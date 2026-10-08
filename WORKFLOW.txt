@@ -38,7 +38,10 @@ mesure.
     - robot01_uv_uv_layout.png : la disposition des ilots (rouge = probleme)
 
   Le fichier robot01_uv.glb est le mesh final du jeu pour la suite.
+  Si le mesh est symetrique (cas general avec Tripo), une seule moitie est
+  depliee et l'autre la reprend en miroir : deux fois plus de resolution.
   Options utiles (detail dans texpipe\blender\README_UV.md) :
+    --symmetry off         textures differentes a gauche et a droite
     --quality seams        moins de coutures
     --hidden-density 1.0   meme resolution partout (dessous compris)
 

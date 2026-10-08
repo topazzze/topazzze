@@ -101,3 +101,48 @@ def test_hidden_density_halves_bottom(tmp_path):
     rep, _ = run_optimizer(tmp_path, lambda: bpy.ops.mesh.primitive_cube_add(), "--hidden-density", "1.0")
     td = rep["texel_density_px_per_m"]
     assert td["min"] == pytest.approx(td["max"], rel=0.02)
+
+
+def _mesh_stats(path):
+    """Normales opposées au reflet attendu et part d'UV superposées
+    entre les côtés gauche et droit."""
+    import bmesh
+
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=str(path))
+    obj = next(o for o in bpy.context.scene.objects if o.type == "MESH")
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    uv = bm.loops.layers.uv.active
+    left, right = set(), set()
+    for f in bm.faces:
+        side = left if f.calc_center_median().x < 0 else right
+        for l in f.loops:
+            side.add(tuple(round(c, 5) for c in l[uv].uv))
+    shared = len(left & right) / max(1, len(right))
+    # Sur une sphère centrée, toute normale doit pointer vers l'extérieur.
+    inverted = sum(1 for f in bm.faces if f.normal.dot(f.calc_center_median()) < 0)
+    return shared, inverted
+
+
+def test_symmetric_mesh_is_mirrored(tmp_path):
+    rep, out = run_optimizer(tmp_path, lambda: bpy.ops.mesh.primitive_uv_sphere_add(segments=32, ring_count=16))
+    check_invariants(rep)
+    assert rep["symmetry"]["mode"] == "mirror"
+    shared, inverted = _mesh_stats(out)
+    assert shared > 0.99  # les deux moitiés partagent les mêmes UV
+    assert inverted == 0  # la moitié recréée n'est pas retournée
+
+
+def test_asymmetric_mesh_is_not_mirrored(tmp_path):
+    def build():
+        bpy.ops.mesh.primitive_cube_add(location=(0, 0, 0))
+        bpy.ops.mesh.primitive_cube_add(size=0.5, location=(1.2, 0, 0.5))
+
+    rep, _ = run_optimizer(tmp_path, build)
+    check_invariants(rep)
+    assert rep["symmetry"]["mode"] == "off"
+    rep, out = run_optimizer(tmp_path, lambda: bpy.ops.mesh.primitive_uv_sphere_add(), "--symmetry", "off")
+    assert rep["symmetry"]["mode"] == "off"
+    shared, _ = _mesh_stats(out)
+    assert shared < 0.5
