@@ -5,7 +5,7 @@
 #
 # Lancer : double-clic sur install.bat, ou dans PowerShell :
 #   powershell -ExecutionPolicy Bypass -File install.ps1            (environnement IA)
-#   powershell -ExecutionPolicy Bypass -File install.ps1 -Models    (+ modèles IA, ~8 Go)
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Models    (+ modèles IA, ~6 Go)
 #   ... -Blender "D:\Blender\blender.exe"                           (si Blender n'est pas trouvé)
 
 param(
@@ -159,16 +159,19 @@ Run $vpy -m pip install --no-deps -e $mva
 
 # 4. Modèles (optionnel) ---------------------------------------------------------
 if ($Models) {
-    Step "Modèles IA (environ 8 Go, dans $ModelsDir)"
+    Step "Modèles IA (environ 6 Go, dans $ModelsDir)"
     Run $vpy -c @"
 from huggingface_hub import snapshot_download
-for repo, pat in [
-    ('huanngzh/mv-adapter', ['mvadapter_ig2mv_sd21.safetensors']),
-    ('stabilityai/stable-diffusion-2-1-base', None),
-    ('ZhengPeng7/BiRefNet', None),
-]:
-    print('->', repo)
-    snapshot_download(repo, allow_patterns=pat)
+print('-> huanngzh/mv-adapter')
+snapshot_download('huanngzh/mv-adapter', allow_patterns=['mvadapter_ig2mv_sd21.safetensors'])
+# SD 2.1 a été retiré du compte officiel : copies des mêmes poids en secours.
+for repo in ['stabilityai/stable-diffusion-2-1-base', 'Manojb/stable-diffusion-2-1-base']:
+    try:
+        print('->', repo)
+        snapshot_download(repo, allow_patterns=['*.json', '*.txt', '*.safetensors'], ignore_patterns=['*ema*', 'v2-1*'])
+        break
+    except Exception as e:
+        print('   indisponible :', type(e).__name__)
 "@
 }
 

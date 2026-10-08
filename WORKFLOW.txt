@@ -1,8 +1,8 @@
 PIPELINE DE TEXTURING - WORKFLOW DE A A Z
 ==========================================
 
-ETAT ACTUEL : les etapes 2 (UV) et 3 (cartes) sont disponibles. Les
-etapes 4 a 7 sont prevues mais pas encore ecrites. Ce fichier sera mis a jour au fur et a
+ETAT ACTUEL : les etapes 2 (UV), 3 (cartes) et 4 (couleur guide) sont
+disponibles. Les etapes 5 a 7 sont prevues mais pas encore ecrites. Ce fichier sera mis a jour au fur et a
 mesure.
 
 
@@ -72,9 +72,20 @@ mesure.
   miroir, un seul cote est calcule ; sinon, tout le mesh l'est.
 
 
-4. COULEUR GUIDE PAR IA (MV-Adapter) ............................. A VENIR
+4. COULEUR GUIDE PAR IA (MV-Adapter) ......................... DISPONIBLE
 ------------------------------------------------------------------
-  A partir du mesh + de l'image de reference, sur la carte graphique.
+    texpipe\color_guide.bat assets\robot01\robot01_uv.glb assets\robot01\robot01_front.png
+
+  Le premier lancement telecharge les modeles (~6 Go, dans F:\Pipeline\models).
+  Produit :
+    _views.png        6 vues generees (face, droite, dos, gauche, dessus, dessous)
+    _color_guide.png  ces vues reprojetees sur les UV du mesh de jeu
+
+  Verifier _views.png : les 6 vues doivent montrer le meme objet, fidele a
+  la reference. Sinon, relancer avec une autre graine (--seed 7) et/ou une
+  description en anglais (--prompt "dark metal robot, purple glowing lines").
+  Une vue retouchee a la main peut etre reprojetee seule :
+    ... --views assets\robot01\robot01_views.png
 
 
 5. DECOUPAGE EN ZONES + VALIDATION ............................... A VENIR
@@ -98,7 +109,7 @@ mesure.
   ArmorPaint ou Blender.
 
 
-EN ATTENDANT LES ETAPES 4 A 7
+EN ATTENDANT LES ETAPES 5 A 7
 ------------------------------------------------------------------
   Apres les etapes 2 et 3, le mesh robot01_uv.glb a ses cartes (normal map,
   AO, courbure) et l'ancienne texture Tripo reprojetee. Il peut etre texture
