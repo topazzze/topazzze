@@ -92,6 +92,9 @@ def parse_args(argv):
     p.add_argument("--max-distortion", type=float, default=None, help="Distorsion moyenne max par îlot (remplace le préréglage ; 0.10 ≈ 10 %%)")
     p.add_argument("--max-distortion-p95", type=float, default=None, help="Distorsion max au 95e centile par îlot (remplace le préréglage)")
     p.add_argument("--max-iterations", type=int, default=30, help="Itérations max de redécoupage")
+    p.add_argument("--aggressive-cuts", action="store_true", help="Coupes ciblées plus nombreuses : meilleur remplissage, mais plus de coutures")
+    p.add_argument("--pack-trials", type=int, default=0, help="Essais de rangement supplémentaires (ordres perturbés), le meilleur est gardé (défaut 0)")
+    p.add_argument("--target-fill", type=float, default=0.80, help="Remplissage visé : des coupes ciblées sont ajoutées tant qu'elles le font progresser (défaut 0.80 ; 0 = aucune)")
     p.add_argument("--min-compactness", type=float, default=0.45, help="Compacité min d'un îlot (aire / enveloppe convexe), pour un rangement serré (défaut 0.45)")
     p.add_argument("--hidden-density", type=float, default=0.5, help="Densité de texels des zones cachées, 1.0 = uniforme (défaut 0.5)")
     p.add_argument("--front", default="-Y", choices=["-Y", "+Y", "-X", "+X"], help="Face avant du mesh dans Blender (défaut -Y, convention glTF)")
@@ -1444,6 +1447,219 @@ class UVOptimizer:
             detached += 1
         log(f"Parties fines détachées sur {detached} îlots")
 
+    # -- redressement des bords (bords rectilignes) ---------------------------
+    def _chart_wedges(self, faces):
+        """Sommets UV d'un îlot : les coins de faces voisines soudés (sans
+        couture entre eux) forment un même sommet UV. Renvoie (id par coin,
+        nombre de sommets UV, liste des coins de l'îlot)."""
+        T = self.topo
+        loops = np.concatenate([np.arange(T.face_loop_start[f], T.face_loop_start[f + 1]) for f in faces])
+        in_chart = set(int(f) for f in faces)
+        parent = {int(l): int(l) for l in loops}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for l in loops:
+            l = int(l)
+            if self.seam[T.loop_edge[l]]:
+                continue
+            r = int(T.loop_radial[l])
+            if r < 0 or int(T.loop_face[r]) not in in_chart:
+                continue
+            for a, b in ((l, int(T.loop_next[r])), (int(T.loop_next[l]), r)):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[ra] = rb
+        roots = {}
+        wid = {}
+        for l in loops:
+            wid[int(l)] = roots.setdefault(find(int(l)), len(roots))
+        return wid, len(roots), loops
+
+    def _boundary_cycle(self, faces, wid):
+        """Bord de l'îlot (disque) sous forme de suite de sommets UV."""
+        T = self.topo
+        in_chart = set(int(f) for f in faces)
+
+        def is_border(l):
+            r = T.loop_radial[l]
+            return r < 0 or self.seam[T.loop_edge[l]] or int(T.loop_face[r]) not in in_chart
+
+        start = None
+        for f in faces:
+            for l in range(T.face_loop_start[f], T.face_loop_start[f + 1]):
+                if is_border(l):
+                    start = l
+                    break
+            if start is not None:
+                break
+        if start is None:
+            return None
+        cycle, l, guard = [], start, 0
+        while True:
+            cycle.append(wid[int(l)])
+            cur = T.loop_next[l]
+            inner = 0
+            while not is_border(cur):
+                cur = T.loop_next[T.loop_radial[cur]]
+                inner += 1
+                if inner > 10000:
+                    return None
+            l = cur
+            guard += 1
+            if l == start or guard > T.L:
+                break
+        return cycle
+
+    def rectify_boundaries(self, tolerances=(20.0, 12.0)):
+        """Redresse les bords des îlots : les portions de bord presque
+        horizontales ou verticales deviennent exactement droites, l'intérieur
+        est recalculé pour garder ses proportions (moindres carrés). Les
+        îlots à bords droits se rangent bien plus serré. Un îlot n'est
+        modifié que si la distorsion reste sous le seuil, sans retournement
+        ni chevauchement."""
+        T = self.topo
+        a = self.args
+        lab, n = self.labels()
+        charts = self.charts(lab, n)
+        mean0, p950, _, _ = self.chart_stats(lab, n)
+        done = 0
+        for c, faces in enumerate(charts):
+            if len(faces) < 3:
+                continue
+            wid, nw, loops = self._chart_wedges(faces)
+            cycle = self._boundary_cycle(faces, wid)
+            if not cycle or len(cycle) < 4:
+                continue
+            q = np.zeros((nw, 2))
+            cnt = np.zeros(nw)
+            for l in loops:
+                q[wid[int(l)]] += self.uv[l]
+                cnt[wid[int(l)]] += 1
+            q /= cnt[:, None]
+            # Orientation : rectangle englobant minimal aligné sur les axes.
+            center = q.mean(0)
+            theta = min_area_rect_angle(q - center)
+            cs, sn = math.cos(-theta), math.sin(-theta)
+            R = np.array([[cs, -sn], [sn, cs]])
+            q = (q - center) @ R.T
+            edges = set()
+            for f in faces:
+                ls = range(T.face_loop_start[f], T.face_loop_start[f + 1])
+                for l in ls:
+                    i, j = wid[int(l)], wid[int(T.loop_next[l])]
+                    if i != j:
+                        edges.add((min(i, j), max(i, j)))
+            edges = np.array(sorted(edges))
+            saved = {int(l): self.uv[l].copy() for l in loops}
+            accepted = False
+            for tol in tolerances:
+                p = self._rectify_solve(q, cycle, edges, tol)
+                if p is None:
+                    continue
+                for l in loops:
+                    self.uv[l] = p[wid[int(l)]]
+                mean, p95, flips, _ = self.chart_stats(lab, n)
+                ok = (flips[c] == 0 and mean[c] <= max(a.max_distortion, mean0[c] * 1.2 + 0.01)
+                      and p95[c] <= max(a.max_distortion_p95, p950[c] * 1.2 + 0.02))
+                if ok:
+                    _, overlap = self.chart_shape(lab, n, [c])
+                    ok = not overlap[c]
+                if ok:
+                    accepted = True
+                    break
+            if accepted:
+                done += 1
+            else:
+                for l, v in saved.items():
+                    self.uv[l] = v
+        self.write_uv()
+        log(f"Bords redressés : {done} îlots sur {n}")
+
+    @staticmethod
+    def _rectify_solve(q, cycle, edges, tol_deg):
+        """Contraint les portions de bord proches d'un axe à être exactement
+        droites, puis résout l'intérieur en conservant au mieux les vecteurs
+        d'arêtes d'origine (x et y indépendants, moindres carrés)."""
+        m = len(cycle)
+        d = np.array([q[cycle[(k + 1) % m]] - q[cycle[k]] for k in range(m)])
+        length = np.linalg.norm(d, axis=1)
+        perim = length.sum()
+        if perim <= 0:
+            return None
+        ang = np.degrees(np.arctan2(d[:, 1], d[:, 0]))
+        cls = np.full(m, -1)
+        for k in range(m):
+            if length[k] <= 1e-12:
+                continue
+            for c_id, target in enumerate((0.0, 90.0, 180.0, -90.0)):
+                diff = (ang[k] - target + 180.0) % 360.0 - 180.0
+                if abs(diff) <= tol_deg:
+                    cls[k] = c_id
+        # Portions consécutives de même direction (le bord est cyclique).
+        runs = []
+        start = next((k for k in range(m) if cls[k] != cls[k - 1]), None)
+        if start is None:
+            return None
+        k = start
+        cur = [k]
+        for step in range(1, m + 1):
+            kk = (start + step) % m
+            if step < m and cls[kk] == cls[cur[-1]]:
+                cur.append(kk)
+            else:
+                runs.append(cur)
+                cur = [kk]
+        fix_x, fix_y = {}, {}
+        conflict_x, conflict_y = set(), set()
+        for run in runs:
+            c_id = cls[run[0]]
+            if c_id < 0 or length[run].sum() < 0.06 * perim:
+                continue
+            verts = [cycle[k] for k in run] + [cycle[(run[-1] + 1) % m]]
+            axis = 1 if c_id in (0, 2) else 0  # horizontal : y fixé ; vertical : x fixé
+            w = np.concatenate([[length[run[0]]], length[run]])  # poids approximatif
+            value = float(np.average(q[verts, axis], weights=w[: len(verts)] + 1e-12))
+            target, conflict = (fix_y, conflict_y) if axis == 1 else (fix_x, conflict_x)
+            for v in verts:
+                if v in target and abs(target[v] - value) > 1e-9:
+                    conflict.add(v)
+                target[v] = value
+        for v in conflict_x:
+            fix_x.pop(v, None)
+        for v in conflict_y:
+            fix_y.pop(v, None)
+        if not fix_x and not fix_y:
+            return None
+        n = len(q)
+        L = np.zeros((n, n))
+        i, j = edges[:, 0], edges[:, 1]
+        np.add.at(L, (i, i), 1.0)
+        np.add.at(L, (j, j), 1.0)
+        np.add.at(L, (i, j), -1.0)
+        np.add.at(L, (j, i), -1.0)
+        p = q.copy()
+        for axis, fixed in ((0, fix_x), (1, fix_y)):
+            if not fixed:
+                continue
+            b = L @ q[:, axis]
+            cidx = np.array(sorted(fixed))
+            cval = np.array([fixed[v] for v in cidx])
+            free = np.setdiff1d(np.arange(n), cidx)
+            if len(free):
+                rhs = b[free] - L[np.ix_(free, cidx)] @ cval
+                try:
+                    sol = np.linalg.lstsq(L[np.ix_(free, free)], rhs, rcond=None)[0]
+                except np.linalg.LinAlgError:
+                    return None
+                p[free, axis] = sol
+            p[cidx, axis] = cval
+        return p
+
     def split_elongated(self, max_rel_length=1.0, rounds=4):
         """Un îlot très long limite l'échelle de tout le rangement (il doit
         tenir dans la largeur de la texture). S'il est plus long que la
@@ -1573,8 +1789,10 @@ class UVOptimizer:
         for l, c in zip(face.loops, corners):
             l[self.uv_layer].uv = c
 
-    def layout(self):
-        """Échelle (densité de texels), orientation et packing final."""
+    def prepare_islands(self):
+        """Met chaque îlot à sa densité de texels et dans l'orientation de
+        son rectangle englobant minimal. Renvoie (îlots en faces, îlots en
+        coins et triangles) pour le rangement."""
         T = self.topo
         a = self.args
         lab, n = self.labels()
@@ -1601,13 +1819,153 @@ class UVOptimizer:
         self.chart_density_factor = density
         self.chart_visibility = vis
 
-        t = time.time()
         islands = []
         for faces in charts:
             loops = np.concatenate([np.arange(T.face_loop_start[f], T.face_loop_start[f + 1]) for f in faces])
             tris = np.nonzero(np.isin(T.tri_face, faces))[0]
             islands.append((loops, T.tri_loops[tris]))
-        placed = raster_pack(self.uv, islands, a.texture_size, a.padding)
+        return charts, islands
+
+    # -- coupes ciblées pour le remplissage (principe de Box Cutter) ----------
+    def improve_packing(self, target=0.80, max_cuts=60, batch=3, grid=512, aggressive=False):
+        """Coupes ciblées (principe de Box Cutter) : les îlots qui gaspillent
+        le plus de place (lames, triangles, encoches) reçoivent une coupe
+        droite qui réduit au mieux la surface de leurs rectangles englobants.
+        Les coupes sont faites par lots ; après chaque lot, un vrai rangement
+        mesure le remplissage, et l'on revient à la fin au meilleur état
+        rencontré (le rangement est trop sensible pour juger coupe par coupe)."""
+        a = self.args
+        T = self.topo
+        t0 = time.time()
+
+        def evaluate():
+            charts, islands = self.prepare_islands()
+            placed = raster_pack(self.uv, islands, a.texture_size, a.padding, grid=grid, fast=True)
+            if placed is None:
+                return 0.0
+            tris = np.concatenate([placed[t] for _, t in islands])
+            return float((raster_count(tris * 512, 512) > 0).mean())
+
+        cov = evaluate()
+        start = cov
+        best = (cov, self.seam.copy(), self.uv.copy(), 0)
+        tried = set()
+        cuts = 0
+        stale = 0
+        cut_kw = dict(min_part=0.08, min_gain=0.0) if aggressive else {}
+        max_stale = 8 if aggressive else 4
+        if aggressive:
+            max_cuts = max(max_cuts, 120)
+        while best[0] < target and cuts < max_cuts and stale < max_stale:
+            lab, n = self.labels()
+            charts = self.charts(lab, n)
+            cands = []
+            for c, faces in enumerate(charts):
+                key = hash(tuple(sorted(int(f) for f in faces)))
+                if key in tried or len(faces) < 4:
+                    continue
+                loops = np.concatenate([np.arange(T.face_loop_start[f], T.face_loop_start[f + 1]) for f in faces])
+                pts = self.uv[loops]
+                theta = min_area_rect_angle(pts - pts.mean(0))
+                cs, sn = math.cos(-theta), math.sin(-theta)
+                r = (pts - pts.mean(0)) @ np.array([[cs, -sn], [sn, cs]]).T
+                ext = r.max(0) - r.min(0)
+                tl = T.tri_loops[np.isin(T.tri_face, faces)]
+                tri = self.uv[tl]
+                d1, d2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
+                area = 0.5 * np.abs(d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]).sum()
+                cands.append((ext[0] * ext[1] - area, c, key))
+            cands.sort(reverse=True)
+            done_batch = 0
+            for waste, c, key in cands:
+                if done_batch >= batch:
+                    break
+                tried.add(key)
+                if self._guillotine_cut(charts[c], **cut_kw):
+                    self.ensure_disks()
+                    self.unwrap(charts[c])
+                    done_batch += 1
+            if done_batch == 0:
+                break
+            cuts += done_batch
+            cov = evaluate()
+            if cov > best[0] + 0.002:
+                best = (cov, self.seam.copy(), self.uv.copy(), cuts)
+                stale = 0
+            else:
+                stale += 1
+        self.seam, self.uv = best[1], best[2]
+        self.write_uv()
+        log(f"Coupes ciblées : {best[3]} gardées sur {cuts} essayées, remplissage estimé "
+            f"{100 * start:.1f} % -> {100 * best[0]:.1f} % ({time.time() - t0:.0f} s)")
+
+    def _guillotine_cut(self, faces, steps=32, min_part=0.10, min_gain=0.08):
+        """Meilleure coupe droite (dans le repère du rectangle minimal de
+        l'îlot) : celle qui réduit le plus la somme des rectangles englobants
+        des deux morceaux. La frontière glisse ensuite vers les arêtes les
+        moins visibles."""
+        T = self.topo
+        faces = np.asarray(faces)
+        cen = np.array([self.uv[T.face_loop_start[f] : T.face_loop_start[f + 1]].mean(0) for f in faces])
+        loops_of = [np.arange(T.face_loop_start[f], T.face_loop_start[f + 1]) for f in faces]
+        allpts = self.uv[np.concatenate(loops_of)]
+        c0 = allpts.mean(0)
+        theta = min_area_rect_angle(allpts - c0)
+        cs, sn = math.cos(-theta), math.sin(-theta)
+        R = np.array([[cs, -sn], [sn, cs]])
+        cen_r = (cen - c0) @ R.T
+        pts_r = [(self.uv[ls] - c0) @ R.T for ls in loops_of]
+        fmin = np.array([p.min(0) for p in pts_r])
+        fmax = np.array([p.max(0) for p in pts_r])
+        farea = T.face_area[faces]
+        total_area = farea.sum()
+        ext = allpts.max(0) - allpts.min(0)
+        whole = (fmax.max(0) - fmin.min(0)).prod()
+        best = None
+        for axis in (0, 1):
+            lo_, hi_ = cen_r[:, axis].min(), cen_r[:, axis].max()
+            for k in range(1, steps):
+                t = lo_ + (hi_ - lo_) * k / steps
+                side = cen_r[:, axis] > t
+                if not side.any() or side.all():
+                    continue
+                aa = farea[side].sum() / total_area
+                if min(aa, 1 - aa) < min_part:
+                    continue
+                cost = 0.0
+                for m in (side, ~side):
+                    cost += (fmax[m].max(0) - fmin[m].min(0)).prod()
+                if best is None or cost < best[0]:
+                    best = (cost, axis, t)
+        if best is None or best[0] > whole * (1 - min_gain):
+            return False
+        _, axis, t = best
+        dn = (cen_r[:, axis] - t) / (float(np.abs(cen_r[:, axis] - t).max()) or 1.0)
+        rel = farea / farea.mean()
+        data = np.stack([np.maximum(0, dn) * 4 * rel, np.maximum(0, -dn) * 4 * rel], 1)
+        label = self._refine(faces, (dn > 0).astype(int), data)
+        if label.min() == label.max():
+            return False
+        boundary = self._boundary_edges(faces, label)
+        for e in boundary:
+            self.seam[e] = True
+        return bool(boundary)
+
+    def layout(self):
+        """Échelle (densité de texels), orientation et rangement final."""
+        a = self.args
+        charts, islands = self.prepare_islands()
+        t = time.time()
+        placed, best_fill = None, -1.0
+        trials = [("contact", None), ("square", None)] + [("contact", s) for s in range(a.pack_trials)]
+        for heuristic, seed in trials:
+            res = raster_pack(self.uv, islands, a.texture_size, a.padding, heuristic=heuristic, seed=seed)
+            if res is None:
+                continue
+            tris = np.concatenate([res[tl] for _, tl in islands])
+            fill = float((raster_count(tris * 1024, 1024) > 0).mean())
+            if fill > best_fill:
+                placed, best_fill = res, fill
         if placed is not None:
             self.uv = placed
             self.write_uv()
@@ -1745,7 +2103,7 @@ def conservative_mask(tri_px, h, w):
     """Masque de toutes les cellules touchées par les triangles (centres
     couverts + points échantillonnés le long des arêtes) : aucune partie
     d'un îlot, même un triangle plus fin qu'une cellule, n'est oubliée."""
-    mask = raster_count(tri_px, max(h, w))[:h, :w] > 0
+    mask = raster_count(tri_px, w, height=h) > 0
     edges = np.concatenate([tri_px[:, [0, 1]], tri_px[:, [1, 2]], tri_px[:, [2, 0]]])
     length = np.linalg.norm(edges[:, 1] - edges[:, 0], axis=1)
     k = int(max(2, np.ceil(length.max() * 2) + 1)) if len(length) else 2
@@ -1757,7 +2115,8 @@ def conservative_mask(tri_px, h, w):
     return mask
 
 
-def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25):
+def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, heuristic="contact",
+                fast=False, seed=None, orientations=4, push_trials=24):
     """Rangement des îlots selon leur forme réelle (principe de xatlas).
 
     Chaque îlot est rastérisé sur une grille ; il est placé, à 0° ou 90°, à
@@ -1765,7 +2124,10 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25):
     positions sont calculées d'un coup par corrélation FFT). L'échelle
     globale est la plus grande pour laquelle tout rentre (dichotomie).
     Renvoie les nouveaux UV, ou None en cas d'échec."""
-    G = int(min(1024, max(256, texture_size // 2)))
+    # Grille de rangement : avec son cadre d'une cellule, elle fait N = G + 2
+    # cellules de côté, N étant une puissance de 2 (FFT 2 à 4 fois plus
+    # rapides qu'avec une taille quelconque).
+    G = int(grid or 512) - 2
     cell_px = texture_size / G
     r = max(1, int(math.ceil(padding_px / (2.0 * cell_px))))
     shapes = []
@@ -1782,27 +2144,42 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25):
         return None
 
     def rot(p, k):
-        for _ in range(k % 4):
-            p = np.stack([-p[..., 1], p[..., 0]], -1)
-        return p
+        """Rotation de k x (360 / n_orient) degrés."""
+        ang = 2.0 * math.pi * k / n_orient
+        cs, sn = math.cos(ang), math.sin(ang)
+        return np.stack([cs * p[..., 0] - sn * p[..., 1], sn * p[..., 0] + cs * p[..., 1]], -1)
 
     def extent(i):
         e = shapes[i][1].max(0) - shapes[i][1].min(0)
         return e
 
     # Plusieurs ordres de placement sont essayés ; on garde le plus dense.
-    orders = [sorted(range(len(shapes)), key=lambda i: -shapes[i][3])]
-    if len(shapes) <= 150:
+    if seed is not None:
+        # Essai aléatoire : ordre par surface, légèrement perturbé.
+        rng = np.random.default_rng(seed)
+        noise = np.exp(rng.normal(0.0, 0.35, len(shapes)))
+        orders = [sorted(range(len(shapes)), key=lambda i: -shapes[i][3] * noise[i])]
+    else:
+        orders = [sorted(range(len(shapes)), key=lambda i: -shapes[i][3])]
+    if len(shapes) <= 150 and not fast and seed is None:
         orders.append(sorted(range(len(shapes)), key=lambda i: -extent(i).max()))
         orders.append(sorted(range(len(shapes)), key=lambda i: -(extent(i).max() * extent(i).min()) ** 0.5 - shapes[i][3]))
-    rotations = (0, 1, 2, 3) if len(shapes) <= 150 else (0, 1)
+    n_orient = int(orientations) if len(shapes) <= 150 else 4
+    rotations = tuple(range(n_orient)) if len(shapes) <= 150 else (0, 1)
 
-    def attempt(scale, order):
-        occ = np.zeros((G, G), dtype=np.float32)
+    def attempt(scale, order, picks=None):
+        # Grille entourée d'un cadre « occupé » : le bord de la texture compte
+        # comme un voisin pour l'heuristique de contact.
+        # `picks` : pour les premiers îlots, rang du candidat retenu (0 = le
+        # meilleur, 1 = le suivant...) ; sert à explorer d'autres agencements.
+        N = G + 2
+        occ = np.zeros((N, N), dtype=np.float32)
+        occ[0, :] = occ[-1, :] = occ[:, 0] = occ[:, -1] = 1.0
         out = uv.copy()
-        for i in order:
+        for rank, i in enumerate(order):
             loops, pts, tri, _ = shapes[i]
             best = None
+            cands_all = []
             occ_f = np.fft.rfft2(occ)
             for k in rotations:
                 pr = rot(pts, k)
@@ -1814,48 +2191,197 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25):
                     continue
                 tp = (rot(tri, k) - mn) * scale + r
                 m = dilate(conservative_mask(tp, h, w), r)
-                mp = np.zeros((G, G), dtype=np.float32)
+                mp = np.zeros((N, N), dtype=np.float32)
                 mp[:h, :w] = m
-                corr = np.fft.irfft2(occ_f * np.conj(np.fft.rfft2(mp)), s=(G, G))
-                free = corr[: G - h + 1, : G - w + 1] < 0.5
+                corr = np.fft.irfft2(occ_f * np.conj(np.fft.rfft2(mp)), s=(N, N))
+                # Positions (dans la grille avec cadre) entièrement à l'intérieur.
+                free = corr[1 : G - h + 2, 1 : G - w + 2] < 0.5
                 if not free.any():
                     continue
                 ys, xs = np.nonzero(free)
-                score = np.maximum(ys + h, xs + w) * (2 * G) + (ys + h) + (xs + w)
+                corner = np.maximum(ys + h, xs + w) * (2 * G) + (ys + h) + (xs + w)
+                if heuristic == "contact":
+                    # Contact : cellules de l'anneau autour de l'îlot qui
+                    # touchent déjà quelque chose (îlot ou bord). Plus il
+                    # touche, moins il laisse de vides.
+                    ring = np.zeros((h + 2, w + 2), dtype=bool)
+                    ring[1:-1, 1:-1] = m
+                    ring = dilate(ring, 1) & ~ring
+                    rp = np.zeros((N, N), dtype=np.float32)
+                    rp[: h + 2, : w + 2] = ring
+                    contact = np.fft.irfft2(occ_f * np.conj(np.fft.rfft2(rp)), s=(N, N))
+                    cval = contact[ys, xs]  # anneau décalé d'une cellule
+                    score = -np.rint(cval) * (8 * G * G) + corner
+                else:
+                    score = corner
                 j = int(np.argmin(score))
                 cand = (score[j], k, int(xs[j]), int(ys[j]), m, mn)
+                cands_all.append(cand)
                 if best is None or cand[0] < best[0]:
                     best = cand
+            if picks is not None and rank < len(picks) and len(cands_all) > 1:
+                cands_all.sort(key=lambda c: c[0])
+                best = cands_all[min(picks[rank], len(cands_all) - 1)]
             if best is None:
+                raster_pack.last_fail = (order.index(i), i, shapes[i][3] / total, scale)
                 return None
             _, k, x, y, m, mn = best
-            occ[y : y + m.shape[0], x : x + m.shape[1]] += m
+            occ[y + 1 : y + 1 + m.shape[0], x + 1 : x + 1 + m.shape[1]] += m
             out[loops] = ((rot(pts, k) - mn) * scale + r + np.array([x, y])) / G
         return out
 
-    winner, winner_scale = None, 0.0
-    for order in orders:
-        hi = G * math.sqrt(1.0 / total)
-        lo = max(G * math.sqrt(fill_lo / total), winner_scale)
-        best = attempt(lo, order)
-        while best is None and lo > 1e-9:
-            hi = lo
-            lo *= 0.7
-            best = attempt(lo, order)
-        if best is None:
-            continue
-        for _ in range(8):
-            mid = math.sqrt(lo * hi)
-            res = attempt(mid, order)
-            if res is None:
-                hi = mid
+    def attempt_any(scale):
+        for order in orders:
+            res = attempt(scale, order)
+            if res is not None:
+                return res
+        return None
+
+    hi = G * math.sqrt(1.0 / total)
+    lo = G * math.sqrt(fill_lo / total)
+    winner = attempt_any(lo)
+    while winner is None and lo > 1e-9:
+        hi = lo
+        lo *= 0.7
+        winner = attempt_any(lo)
+    if winner is None:
+        return None
+    for _ in range(9):
+        mid = math.sqrt(lo * hi)
+        res = attempt_any(mid)
+        if res is None:
+            hi = mid
+        else:
+            lo, winner = mid, res
+        if hi / lo < (1.02 if fast else 1.008):
+            break
+
+    # Recherche au-delà : on vise un remplissage un peu plus haut et l'on
+    # essaie d'autres agencements des grandes pièces (2e ou 3e meilleur
+    # emplacement / orientation pour l'une des premières), qui décident de
+    # la forme des vides laissés aux suivantes.
+    if not fast and push_trials > 0:
+        rng = np.random.default_rng(12345)
+        base = orders[0]
+        k_big = min(8, len(base))
+        step = 1.012
+        failures = 0
+        while failures < 2:
+            target = lo * step
+            found = None
+            for _ in range(push_trials):
+                picks = [0] * k_big
+                for _j in range(rng.integers(1, 4)):
+                    picks[int(rng.integers(0, k_big))] = int(rng.integers(1, 4))
+                res = attempt(target, base, picks)
+                if res is not None:
+                    found = res
+                    break
+            if found is None:
+                failures += 1
+                step = 1.006
             else:
-                lo, best = mid, res
-            if hi / lo < 1.01:
-                break
-        if lo > winner_scale:
-            winner, winner_scale = best, lo
+                lo, winner = target, found
     return winner
+
+
+def pair_islands(uv, islands, pad_unit, top=14, min_gain=0.08, res=96):
+    """Appariement tête-bêche des grands îlots peu rectangulaires (lames,
+    triangles, trapèzes) : deux pièces accolées, l'une éventuellement tournée,
+    peuvent former un quasi-rectangle que le rangement place d'un bloc. On
+    garde un appariement s'il remplit son rectangle englobant nettement mieux
+    que les deux pièces séparées. Renvoie (uv modifiées, îlots fusionnés)."""
+    uv = uv.copy()
+    info = []
+    for idx, (loops, tl) in enumerate(islands):
+        tri = uv[tl]
+        d1, d2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
+        area = 0.5 * np.abs(d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]).sum()
+        pts = uv[loops]
+        ext = pts.max(0) - pts.min(0)
+        info.append((area, area / max(ext[0] * ext[1], 1e-20), idx))
+    big = [x for x in sorted(info, reverse=True)[:top] if x[1] < 0.8]
+    if len(big) < 2:
+        return uv, islands
+
+    def rot(p, k):
+        for _ in range(k):
+            p = np.stack([-p[..., 1], p[..., 0]], -1)
+        return p
+
+    def profiles(tri, lo, cell, h):
+        """Bords gauche et droit de l'îlot, ligne par ligne (en cellules)."""
+        w = int(math.ceil((tri.reshape(-1, 2)[:, 0].max() - lo[0]) / cell)) + 2
+        m = conservative_mask((tri - lo) / cell, h, w)
+        rows = m.any(1)
+        left = np.where(rows, m.argmax(1), 10 ** 9)
+        right = np.where(rows, w - 1 - m[:, ::-1].argmax(1), -(10 ** 9))
+        return left, right
+
+    best_pairs = []
+    for ia in range(len(big)):
+        for ib in range(ia + 1, len(big)):
+            a_area, a_fill, a = big[ia]
+            b_area, b_fill, b = big[ib]
+            ta = uv[islands[a][1]]
+            pa = uv[islands[a][0]]
+            lo_a = pa.min(0)
+            ext_a = pa.max(0) - lo_a
+            cell = max(ext_a.max(), 1e-9) / res
+            gap = int(math.ceil(pad_unit / cell))
+            best = None
+            for k in range(4):
+                tb = rot(uv[islands[b][1]], k)
+                pb = rot(uv[islands[b][0]], k)
+                lo_b = pb.min(0)
+                ext_b = pb.max(0) - lo_b
+                ha = int(math.ceil(ext_a[1] / cell)) + 2
+                hb = int(math.ceil(ext_b[1] / cell)) + 2
+                la, ra = profiles(ta, lo_a, cell, ha)
+                lb, rb = profiles(tb, lo_b, cell, hb)
+                for dy in range(-hb + 1, ha):
+                    # Décalage minimal de B vers la droite de A, à la ligne dy.
+                    ya = np.arange(max(0, dy), min(ha, dy + hb))
+                    if len(ya) == 0:
+                        continue
+                    need = ra[ya] - lb[ya - dy]
+                    need = need[np.abs(need) < 10 ** 8]
+                    shift = (need.max() + 1 + gap) if len(need) else 0
+                    shift = max(shift, 0)
+                    W = max(ext_a[0], shift * cell + ext_b[0])
+                    y0 = min(0.0, dy * cell)
+                    H = max(ext_a[1], dy * cell + ext_b[1]) - y0
+                    fill = (a_area + b_area) / (W * H)
+                    if best is None or fill > best[0]:
+                        best = (fill, k, shift * cell, dy * cell, lo_a, lo_b)
+            if best and best[0] > max(a_fill, b_fill) + min_gain:
+                best_pairs.append((best[0] - max(a_fill, b_fill), a, b, best))
+    best_pairs.sort(key=lambda x: -x[0])
+    used = set()
+    merged = []
+    for gain, a, b, (fill, k, sx, sy, lo_a, lo_b) in best_pairs:
+        if a in used or b in used:
+            continue
+        used.update((a, b))
+        lb_ = islands[b][0]
+        pb = rot(uv[lb_], k)
+        uv[lb_] = pb - lo_b + lo_a + np.array([sx, sy])
+        merged.append((a, b))
+    if not merged:
+        return uv, islands
+    out = []
+    partner = {a: b for a, b in merged}
+    skip = {b for _, b in merged}
+    for idx, (loops, tl) in enumerate(islands):
+        if idx in skip:
+            continue
+        if idx in partner:
+            b = partner[idx]
+            out.append((np.concatenate([loops, islands[b][0]]), np.concatenate([tl, islands[b][1]])))
+        else:
+            out.append((loops, tl))
+    pair_islands.last = len(merged)
+    return uv, out
 
 
 def erode(mask, r):
@@ -1878,24 +2404,60 @@ def dilate(mask, r):
     return out
 
 
-def raster_count(tri_px, res):
+def raster_count(tri_px, res, height=None):
     """Compte, par pixel, les triangles qui couvrent son centre.
-    `tri_px` : (T, 3, 2) en coordonnées pixel."""
-    cover = np.zeros((res, res), dtype=np.int32)
-    for p in tri_px:
-        x0, y0 = np.maximum(np.floor(p.min(0)).astype(int), 0)
-        x1, y1 = np.minimum(np.ceil(p.max(0)).astype(int), res)
-        if x1 <= x0 or y1 <= y0:
-            continue
+    `tri_px` : (T, 3, 2) en coordonnées pixel. Vectorisé par paquets de
+    triangles de taille voisine."""
+    H = res if height is None else height
+    W = res
+    cover = np.zeros((H, W), dtype=np.int32)
+    if len(tri_px) == 0:
+        return cover
+    lo = np.floor(tri_px.min(1)).astype(int)
+    hi = np.ceil(tri_px.max(1)).astype(int)
+    lo = np.maximum(lo, 0)
+    hi = np.minimum(hi, [W, H])
+    size = np.maximum(hi - lo, 0)
+    ok = (size[:, 0] > 0) & (size[:, 1] > 0)
+    a, b, c = tri_px[:, 0], tri_px[:, 1], tri_px[:, 2]
+    d = (b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0]) + (c[:, 0] - b[:, 0]) * (a[:, 1] - c[:, 1])
+    ok &= np.abs(d) > 1e-12
+    # Grands triangles : un par un (la vectorisation y perd).
+    big = ok & (size[:, 0] * size[:, 1] > 1024)
+    for t in np.nonzero(big)[0]:
+        x0, y0 = lo[t]
+        x1, y1 = hi[t]
         X, Y = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y0, y1) + 0.5)
-        (ax, ay), (bx, by), (cx, cy) = p
-        d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
-        if abs(d) < 1e-12:
-            continue
-        l1 = ((by - cy) * (X - cx) + (cx - bx) * (Y - cy)) / d
-        l2 = ((cy - ay) * (X - cx) + (ax - cx) * (Y - cy)) / d
-        inside = (l1 > 1e-4) & (l2 > 1e-4) & (1 - l1 - l2 > 1e-4)
-        cover[y0:y1, x0:x1] += inside
+        (ax, ay), (bx, by), (cx, cy) = tri_px[t]
+        l1 = ((by - cy) * (X - cx) + (cx - bx) * (Y - cy)) / d[t]
+        l2 = ((cy - ay) * (X - cx) + (ax - cx) * (Y - cy)) / d[t]
+        cover[y0:y1, x0:x1] += (l1 > 1e-4) & (l2 > 1e-4) & (1 - l1 - l2 > 1e-4)
+    idx = np.nonzero(ok & ~big)[0]
+    if len(idx) == 0:
+        return cover
+    # Petits triangles : par paquets de boîtes de même taille (puissances de 2).
+    bw = 1 << np.ceil(np.log2(np.maximum(size[idx, 0], 1))).astype(int)
+    bh = 1 << np.ceil(np.log2(np.maximum(size[idx, 1], 1))).astype(int)
+    for key in set(zip(bw.tolist(), bh.tolist())):
+        sel = idx[(bw == key[0]) & (bh == key[1])]
+        gw, gh = key
+        for chunk in range(0, len(sel), max(1, 200000 // (gw * gh))):
+            t = sel[chunk : chunk + max(1, 200000 // (gw * gh))]
+            xs = lo[t, 0, None, None] + np.arange(gw)[None, None, :] + 0.5
+            ys = lo[t, 1, None, None] + np.arange(gh)[None, :, None] + 0.5
+            ax, ay = a[t, 0, None, None], a[t, 1, None, None]
+            bx, by = b[t, 0, None, None], b[t, 1, None, None]
+            cx, cy = c[t, 0, None, None], c[t, 1, None, None]
+            dd = d[t, None, None]
+            l1 = ((by - cy) * (xs - cx) + (cx - bx) * (ys - cy)) / dd
+            l2 = ((cy - ay) * (xs - cx) + (ax - cx) * (ys - cy)) / dd
+            inside = (l1 > 1e-4) & (l2 > 1e-4) & (1 - l1 - l2 > 1e-4)
+            px = (xs - 0.5).astype(int)
+            py = (ys - 0.5).astype(int)
+            valid = inside & (px < W) & (py < H)
+            ti, yy, xx = np.nonzero(valid)
+            flat = py[ti, yy, 0] * W + px[ti, 0, xx]
+            cover += np.bincount(flat, minlength=H * W).reshape(H, W).astype(np.int32)
     return cover
 
 
@@ -2185,6 +2747,11 @@ def run(args):
     opt.segment()
     if not args.no_straighten:
         opt.straighten()
+        opt.rectify_boundaries()
+    if args.target_fill > 0:
+        opt.improve_packing(target=args.target_fill, aggressive=args.aggressive_cuts)
+        if not args.no_straighten:
+            opt.rectify_boundaries()
     opt.layout()
 
     # Réparation : un îlot qui se chevauche lui-même est redécoupé (contrôle
