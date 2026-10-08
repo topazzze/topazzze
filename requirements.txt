@@ -1,0 +1,13 @@
+# Environnement IA du pipeline (PyTorch CUDA est installé à part par install.ps1).
+diffusers>=0.31
+transformers>=4.46
+accelerate
+safetensors
+huggingface_hub
+peft
+einops
+numpy
+opencv-python
+pillow
+scikit-image
+timm

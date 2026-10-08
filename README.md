@@ -15,6 +15,10 @@ Unreal Engine, avec des outils gratuits utilisables commercialement.
 | Composition des couches de matériau | — | à venir |
 | Export et import Unreal | — | à venir |
 
+Installation (Windows) : double-clic sur `install.bat` (Git, Blender, Python 3.11,
+PyTorch CUDA, bibliothèques, MV-Adapter). Ajouter `-Models` pour télécharger
+aussi les modèles IA (~8 Go) : `install.bat -Models`.
+
 Démarrage rapide (Windows) :
 
 ```bat
