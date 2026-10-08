@@ -1,0 +1,87 @@
+PIPELINE DE TEXTURING - WORKFLOW DE A A Z
+==========================================
+
+ETAT ACTUEL : seule l'etape 2 (UV) est disponible. Les etapes 3 a 7 sont
+prevues mais pas encore ecrites. Ce fichier sera mis a jour au fur et a
+mesure.
+
+
+0. INSTALLATION (une seule fois) ............................. FAIT
+------------------------------------------------------------------
+  Double-clic sur F:\Pipeline\install.bat
+  Mise a jour du pipeline : recuperer la derniere version du repo GitHub
+  (branche claude/keen-heisenberg-we6ihj), puis relancer install.bat.
+
+
+1. PREPARER UN ASSET DANS TRIPO3D ................................
+------------------------------------------------------------------
+  Pour chaque asset, depuis la MEME generation Tripo, telecharger :
+    - la version Smart Low Poly (.glb)        -> mesh du jeu
+    - la version de base, detaillee (.glb)    -> source du relief
+    - l'image de reference (.png)             -> lumiere neutre si possible
+
+  Les ranger dans un dossier par asset, par exemple :
+    F:\Pipeline\assets\robot01\robot01_low.glb
+    F:\Pipeline\assets\robot01\robot01_high.glb
+    F:\Pipeline\assets\robot01\robot01_ref.png
+
+
+2. UV (depliage optimise) ................................ DISPONIBLE
+------------------------------------------------------------------
+  Ouvrir une invite de commandes dans F:\Pipeline, puis :
+
+    texpipe\uv_optimize.bat assets\robot01\robot01_low.glb assets\robot01\robot01_uv.glb --texture-size 4096 --preview assets\robot01\apercu.png
+
+  Verifier ensuite :
+    - robot01_uv_uv_report.json : "status" doit valoir "OK"
+    - apercu.png : les carres du damier doivent etre reguliers partout
+    - robot01_uv_uv_layout.png : la disposition des ilots (rouge = probleme)
+
+  Le fichier robot01_uv.glb est le mesh final du jeu pour la suite.
+  Options utiles (detail dans texpipe\blender\README_UV.md) :
+    --quality seams        moins de coutures
+    --hidden-density 1.0   meme resolution partout (dessous compris)
+
+
+3. CALCUL DES CARTES DE GEOMETRIE ................................ A VENIR
+------------------------------------------------------------------
+  Normales (depuis le mesh detaille), AO, courbure, chanfreins.
+
+
+4. COULEUR GUIDE PAR IA (MV-Adapter) ............................. A VENIR
+------------------------------------------------------------------
+  A partir du mesh + de l'image de reference, sur la carte graphique.
+
+
+5. DECOUPAGE EN ZONES + VALIDATION ............................... A VENIR
+------------------------------------------------------------------
+  Le pipeline propose des zones numerotees ; tu indiques le materiau de
+  chaque zone dans un petit fichier (1 a 2 minutes par asset).
+
+
+6. COMPOSITION DES MATERIAUX ..................................... A VENIR
+------------------------------------------------------------------
+  Materiaux PBR reels + usure, salete, poussiere selon la geometrie.
+
+
+7. EXPORT ET IMPORT UNREAL ....................................... A VENIR
+------------------------------------------------------------------
+  Textures BaseColor / Normal / ORM et import automatique dans le projet.
+
+
+8. RETOUCHE MANUELLE (optionnel, assets heros) ...................
+------------------------------------------------------------------
+  ArmorPaint ou Blender.
+
+
+EN ATTENDANT LES ETAPES 3 A 7
+------------------------------------------------------------------
+  Apres l'etape 2, le mesh robot01_uv.glb a deja l'ancienne texture Tripo
+  reprojetee (robot01_uv_basecolor_transfer.png). Il peut etre texture a la
+  main dans ArmorPaint ou Blender, ou importe tel quel dans Unreal.
+
+
+EN CAS DE PROBLEME
+------------------------------------------------------------------
+  Envoyer le message d'erreur et, pour les UV, le fichier *_uv_report.json
+  avec l'image *_uv_layout.png.
