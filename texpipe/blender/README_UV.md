@@ -115,9 +115,9 @@ la pratique standard des productions de jeu.
   la droite (écart mesuré et affiché, 0,004 % sur l'Archange).
 - `--symmetry off` : chaque côté a ses propres UV, pour des détails
   asymétriques (usure, marquages différents à gauche et à droite).
-- Le calcul des cartes (normal map, AO) devra se faire sur une seule moitié,
-  puisque les deux côtés partagent les mêmes pixels : l'étape suivante du
-  pipeline en tiendra compte.
+- Le calcul des cartes (normal map, AO) se fait alors sur une seule moitié,
+  puisque les deux côtés partagent les mêmes pixels : `bake_maps.py`
+  (étape 3) le détecte tout seul.
 
 ## Réglages utiles
 
@@ -129,6 +129,7 @@ la pratique standard des productions de jeu.
 | `--sharp-angle` | auto | 65°, relevé seul sur les meshes très facettés (Tripo : ~115°) ; ou une valeur fixe |
 | `--hidden-density` | 0.5 | 1.0 = même résolution partout |
 | `--front` | `-Y` | Face avant du mesh (convention glTF : -Y dans Blender) |
+| `--thorough` | — | Remplissage un peu meilleur (Archange 77,3 % -> 78,2 %, 90 îlots au lieu de 81), 3 à 4 fois plus long |
 | `--min-compactness` | 0.45 | Monter pour un rangement plus serré (plus d'îlots) |
 | `--save-blend` | — | Garde une scène .blend avec les anciens et nouveaux UV |
 

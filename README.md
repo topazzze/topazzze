@@ -9,7 +9,7 @@ Unreal Engine, avec des outils gratuits utilisables commercialement.
 | Étape | Script | État |
 |---|---|---|
 | Dépliage UV de qualité production | [`texpipe/blender/uv_optimize.py`](texpipe/blender/README_UV.md) | ✅ testé |
-| Calcul des cartes (normales, AO, courbure) | — | à venir |
+| Calcul des cartes (normales, AO, courbure) | [`texpipe/blender/bake_maps.py`](texpipe/blender/README_BAKE.md) | ✅ testé |
 | Couleur guide (MV-Adapter / StableGen) | — | à venir |
 | Découpage en zones de matériau | — | à venir |
 | Composition des couches de matériau | — | à venir |
@@ -23,4 +23,5 @@ Démarrage rapide (Windows) :
 
 ```bat
 texpipe\uv_optimize.bat robot_low.glb robot_low_uv.glb --texture-size 4096 --preview apercu.png
+texpipe\bake_maps.bat robot_low_uv.glb robot_high.glb --texture-size 4096 --preview apercu_bake.png
 ```

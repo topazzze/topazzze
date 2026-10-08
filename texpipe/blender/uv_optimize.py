@@ -95,6 +95,9 @@ def parse_args(argv):
     p.add_argument("--gentle-cuts", dest="aggressive_cuts", action="store_false", default=True,
                    help="Coupes ciblées plus prudentes : moins de coutures, remplissage plus faible "
                         "(par défaut, coupes plus nombreuses : sur l'Archange 72 % -> 75,6 %, +15 %% de coutures)")
+    p.add_argument("--thorough", action="store_true",
+                   help="Coupes ciblées jugées sur de vrais rangements : meilleur remplissage "
+                        "(Archange 77,3 %% -> 78,2 %%), 3 à 4 fois plus long")
     p.add_argument("--no-flip", action="store_true", help="Interdire le retournement en miroir des îlots au rangement")
     p.add_argument("--fine-grid", action="store_true", help="Affiner le rangement sur une grille deux fois plus fine (plus lent, gain non garanti)")
     p.add_argument("--pack-trials", type=int, default=0, help="Essais de rangement supplémentaires (ordres perturbés), le meilleur est gardé (défaut 0)")
@@ -1846,8 +1849,11 @@ class UVOptimizer:
 
         def evaluate():
             charts, islands = self.prepare_islands()
-            placed = raster_pack(self.uv, islands, a.texture_size, a.padding, grid=grid, fast=True,
-                                 allow_flip=not a.no_flip)
+            # --thorough : chaque lot de coupes est jugé sur un vrai rangement
+            # (avec recherche) plutôt que sur une estimation rapide, moins
+            # bruitée : Archange 77,3 % -> 78,2 %, mais 3 à 4 fois plus long.
+            placed = raster_pack(self.uv, islands, a.texture_size, a.padding, grid=grid, fast=not a.thorough,
+                                 allow_flip=not a.no_flip, push_trials=8)
             if placed is None:
                 return 0.0
             last.update(placed=placed, islands=islands, charts=charts)

@@ -1,8 +1,8 @@
 PIPELINE DE TEXTURING - WORKFLOW DE A A Z
 ==========================================
 
-ETAT ACTUEL : seule l'etape 2 (UV) est disponible. Les etapes 3 a 7 sont
-prevues mais pas encore ecrites. Ce fichier sera mis a jour au fur et a
+ETAT ACTUEL : les etapes 2 (UV) et 3 (cartes) sont disponibles. Les
+etapes 4 a 7 sont prevues mais pas encore ecrites. Ce fichier sera mis a jour au fur et a
 mesure.
 
 
@@ -47,9 +47,29 @@ mesure.
     --hidden-density 1.0   meme resolution partout (dessous compris)
 
 
-3. CALCUL DES CARTES DE GEOMETRIE ................................ A VENIR
+3. CALCUL DES CARTES DE GEOMETRIE ............................ DISPONIBLE
 ------------------------------------------------------------------
-  Normales (depuis le mesh detaille), AO, courbure, chanfreins.
+  Toujours dans F:\Pipeline :
+
+    texpipe\bake_maps.bat assets\robot01\robot01_uv.glb assets\robot01\robot01_high.glb --texture-size 4096 --preview assets\robot01\apercu_bake.png
+
+  Produit dans le dossier de l'asset (prefixe robot01_) :
+    _normal.png     normal map (DirectX, pour Unreal)
+    _ao.png         occlusion ambiante
+    _curvature.png  courbure (aretes claires, creux sombres)
+    _height.png     hauteur, _up.png orientation vers le haut
+    _basecolor_high.png / _roughness_high.png / _metallic_high.png
+                    couleurs Tripo reprojetees (guides pour l'etape 5)
+
+  Verifier ensuite :
+    - apercu_bake.png : le mesh de jeu (1re et 3e image) doit ressembler
+      au HighPoly (2e et 4e)
+    - robot01_bake_report.json : "pixels_missed_percent" faible
+    - robot01_bake_check.png : en rouge, les zones ou le HighPoly n'a pas
+      ete trouve (parties simplifiees du LowPoly ; quelques % c'est normal)
+
+  Symetrique ou non : rien a regler. Si l'etape 2 a mis les deux cotes en
+  miroir, un seul cote est calcule ; sinon, tout le mesh l'est.
 
 
 4. COULEUR GUIDE PAR IA (MV-Adapter) ............................. A VENIR
@@ -78,14 +98,16 @@ mesure.
   ArmorPaint ou Blender.
 
 
-EN ATTENDANT LES ETAPES 3 A 7
+EN ATTENDANT LES ETAPES 4 A 7
 ------------------------------------------------------------------
-  Apres l'etape 2, le mesh robot01_uv.glb a deja l'ancienne texture Tripo
-  reprojetee (robot01_uv_basecolor_transfer.png). Il peut etre texture a la
-  main dans ArmorPaint ou Blender, ou importe tel quel dans Unreal.
+  Apres les etapes 2 et 3, le mesh robot01_uv.glb a ses cartes (normal map,
+  AO, courbure) et l'ancienne texture Tripo reprojetee. Il peut etre texture
+  a la main dans ArmorPaint ou Blender, ou importe tel quel dans Unreal
+  (normal map : aucun reglage, elle est deja dans la convention d'Unreal).
 
 
 EN CAS DE PROBLEME
 ------------------------------------------------------------------
   Envoyer le message d'erreur et, pour les UV, le fichier *_uv_report.json
-  avec l'image *_uv_layout.png.
+  avec l'image *_uv_layout.png ; pour les cartes, *_bake_report.json avec
+  *_bake_check.png et l'apercu.
