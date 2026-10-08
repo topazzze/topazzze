@@ -19,8 +19,13 @@ Découpe la surface en zones de matériau, propose un matériau par zone et
    - Les bords anticrénelés (mélange de deux aplats) sont rattachés à
      l'aplat le plus proche.
    - Les LED gardent des bords nets.
-   - Les côtés non vus sont complétés : lignes lumineuses reprises des images
-     éclairées, le reste étendu depuis les zones voisines.
+   - Priorité à l'image de face : elle décide partout où elle voit
+     correctement la surface ; le dos puis les côtés complètent le reste. Des
+     images pas tout à fait cohérentes entre elles ne se mélangent donc pas.
+   - Les gris du dessin (contours, ombrages, reflets) sont rattachés soit au
+     noir du corps, soit au gris des rotules, selon leur clarté.
+   - Les parties vues par aucune image (creux, dessous) reçoivent le matériau
+     principal (`--hidden-fill neighbors` pour prolonger les zones voisines).
 2. **Sans image unlit** : couleur guide de l'étape 4 et couleur Tripo. Les
    reflets et halos de ces images éclairées rendent les limites moins
    précises.

@@ -544,11 +544,14 @@ def use_references(a, images, views, masks, size):
     return used
 
 
-def back_project(images, views, pos, nrm, covered, masks=None, best_only=False):
+def back_project(images, views, pos, nrm, covered, masks=None, best_only=False, priority=False):
     """Couleur de chaque pixel de texture : moyenne des vues qui le voient,
     pondérée par l'angle (une vue de face compte plus qu'une vue rasante).
     `best_only` : seule la vue qui voit la surface le plus de face décide
-    (pas de mélange entre des images légèrement décalées)."""
+    (pas de mélange entre des images légèrement décalées).
+    `priority` : les images sont prises dans l'ordre donné ; chacune décide
+    là où elle voit correctement la surface (angle < 70°) et où aucune image
+    précédente n'a décidé ; le reste revient à la vue la plus de face."""
     size_v = views[0]["mask"].shape[0]
     acc = np.zeros(pos.shape[:2] + (images[0].shape[-1],), dtype=np.float32)
     wsum = np.zeros(pos.shape[:2], dtype=np.float32)
@@ -570,7 +573,15 @@ def back_project(images, views, pos, nrm, covered, masks=None, best_only=False):
         cos = np.clip(n @ vw["cam"][3], 0, 1)
         w = vweight * cos ** 2 * visible
         c = bilinear(img, xy)
-        if best_only:
+        if priority:
+            free = (best_w < 0.12) & (w > best_w)  # angle > 70° dans les vues précédentes
+            win = free & ((w >= 0.12) | (best_w == 0))
+            best_w = np.where(win, w, best_w)
+            cur = acc[sel]
+            cur[win] = c[win]
+            acc[sel] = cur
+            wsum[sel] = np.maximum(wsum[sel], w)
+        elif best_only:
             win = w > best_w
             best_w = np.where(win, w, best_w)
             cur = acc[sel]
@@ -581,7 +592,7 @@ def back_project(images, views, pos, nrm, covered, masks=None, best_only=False):
             acc[sel] += c * w[:, None]
             wsum[sel] += w
     seen = wsum > 1e-4
-    color = acc if best_only else acc / np.maximum(wsum, 1e-8)[..., None]
+    color = acc if (best_only or priority) else acc / np.maximum(wsum, 1e-8)[..., None]
     return color, seen
 
 

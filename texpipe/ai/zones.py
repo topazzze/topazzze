@@ -58,6 +58,9 @@ def parse_args(argv=None):
                    help="Images sans éclairage (aplats de couleur). Défaut : trouvées dans le dossier "
                         "(nom contenant « unlit », ex. Archange_Front_Unlit.png)")
     p.add_argument("--bg-tolerance", type=int, default=12, help="Détourage du fond des images unlit")
+    p.add_argument("--hidden-fill", default="main", choices=["main", "neighbors"],
+                   help="Parties vues par aucune image unlit : main (défaut) = matériau principal ; "
+                        "neighbors = prolongement des zones voisines")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args(argv)
     a.mesh = os.path.abspath(a.mesh)
@@ -308,7 +311,9 @@ def find_unlit(a):
         low = os.path.basename(pth).lower()
         side = next((sd for sd in ("back", "left", "right", "front") if sd in low), "front")
         out.append((side, pth))
-    return out
+    # Ordre de priorité : la face (référence principale), puis le dos, puis les côtés.
+    rank = {"front": 0, "back": 1, "left": 2, "right": 3}
+    return sorted(out, key=lambda t: rank[t[0]])
 
 
 def project_unlit(unlit, tri_p, tri_n, tri_uv, size, a, view_size=1024):
@@ -346,15 +351,8 @@ def project_unlit(unlit, tri_p, tri_n, tri_uv, size, a, view_size=1024):
         oh[ys, xs, lab_px] = 1.0
         onehots.append(oh)
     pos, nrm, covered = cg.texel_maps(tp, tri_n, tri_uv, size)
-    votes, seen = cg.back_project(onehots, vws, pos, nrm, covered, masks, best_only=True)
+    votes, seen = cg.back_project(onehots, vws, pos, nrm, covered, masks, priority=True)
     return np.argmax(votes, -1), seen & covered, colors
-
-
-def same_gray(l1, l2):
-    """Deux gris (clair et foncé) d'une même pièce : ombrage du dessin, pas
-    deux matériaux. Le noir (clarté < 25) reste à part."""
-    neutral = np.hypot(l1[1], l1[2]) < 10 and np.hypot(l2[1], l2[2]) < 10
-    return bool(neutral and min(l1[0], l2[0]) > 25 and abs(l1[0] - l2[0]) < 30)
 
 
 def classify_flat_colors(pixel_sets, a):
@@ -379,7 +377,7 @@ def classify_flat_colors(pixel_sets, a):
             others = [j for j in alive if j != m and size[j] > size[m]]
             best = None
             for ii, i in enumerate(others):
-                if np.linalg.norm(cl[i] - cl[m]) < a.merge or same_gray(cl[i], cl[m]):  # même couleur ou même gris
+                if np.linalg.norm(cl[i] - cl[m]) < a.merge:  # presque la même couleur
                     best = (0.0, i, i, 0.0)
                     break
                 for j in others[ii + 1 :]:
@@ -400,6 +398,28 @@ def classify_flat_colors(pixel_sets, a):
                 alive.remove(m)
                 changed = True
                 break
+    # Gris sans teinte : contours, ombrages et reflets du dessin. Chacun est
+    # rattaché soit à la couleur sombre principale (le corps), soit au gris
+    # principal plus clair (rotules...), selon sa clarté.
+    neutral = [j for j in alive if np.hypot(cl[j][1], cl[j][2]) < 10]
+    if len(neutral) > 1:
+        body = max(neutral, key=lambda j: size[j])
+        lighter = [j for j in neutral if cl[j][0] > cl[body][0] + 20]
+        gray = max(lighter, key=lambda j: size[j]) if lighter else None
+        for m in [j for j in neutral if j not in (body, gray)]:
+            if gray is None:
+                dest = body if abs(cl[m][0] - cl[body][0]) < 20 else None
+            else:
+                cut = cl[body][0] + 0.65 * (cl[gray][0] - cl[body][0])
+                dest = body if cl[m][0] < cut else gray
+            if dest is None:
+                continue
+            for key, val in target.items():
+                if val == m:
+                    target[key] = dest
+            size[dest] += size[m]
+            size[m] = 0
+            alive.remove(m)
     # Couleurs presque absentes (pixels de bord mêlés au fond) : rattachées à
     # la couleur restante la plus proche.
     tiny = [j for j in alive if size[j] < 0.003 * size.sum()]
@@ -441,17 +461,22 @@ def zones_from_unlit(a, lab, seen, covered, emis, colors):
         lab = np.where(seen, majority(lab, seen, k, r), lab)
     hidden = covered & ~seen
     glow = [j for j in range(k) if mats[j] == "emissif"]
-    fill_src = seen & ~np.isin(lab, glow) if glow else seen
-    onehot = np.stack([(lab == j) & fill_src for j in range(k)], -1).astype(np.float32)
-    filled = np.argmax(fill_invalid(onehot, fill_src), -1)
-    lab = np.where(seen, lab, filled)
+    if a.hidden_fill == "main":
+        # Parties invisibles : matériau principal (la plus grande zone).
+        main = int(np.argmax([(seen & (lab == j)).sum() for j in range(k)]))
+        lab = np.where(seen, lab, main)
+    else:
+        fill_src = seen & ~np.isin(lab, glow) if glow else seen
+        onehot = np.stack([(lab == j) & fill_src for j in range(k)], -1).astype(np.float32)
+        filled = np.argmax(fill_invalid(onehot, fill_src), -1)
+        lab = np.where(seen, lab, filled)
     # Secours par les images éclairées seulement si les images unlit laissent
     # beaucoup de surface invisible (sinon, les reflets y passent pour des LED).
     if glow and emis is not None and hidden.sum() > 0.2 * covered.sum():
         lab[hidden & emis] = max(glow, key=lambda j: (seen & (lab == j)).sum())
     if hidden.any():
         log(f"{100 * hidden.sum() / covered.sum():.0f} % de la surface n'est vue par aucune image unlit "
-            "(creux, dessus, dessous...) : complétée par les zones voisines")
+            "(creux, dessus, dessous...) : " + ("matériau principal" if a.hidden_fill == "main" else "zones voisines"))
     return lab, k, mats
 
 
