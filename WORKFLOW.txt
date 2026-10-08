@@ -1,8 +1,8 @@
 PIPELINE DE TEXTURING - WORKFLOW DE A A Z
 ==========================================
 
-ETAT ACTUEL : les etapes 2 (UV), 3 (cartes) et 4 (couleur guide) sont
-disponibles. Les etapes 5 a 7 sont prevues mais pas encore ecrites. Ce fichier sera mis a jour au fur et a
+ETAT ACTUEL : les etapes 2 a 6 sont disponibles. L'export vers Unreal
+(etape 7) se fait a la main. Ce fichier sera mis a jour au fur et a
 mesure.
 
 
@@ -91,33 +91,47 @@ mesure.
     ... --views assets\robot01\robot01_views.png
 
 
-5. DECOUPAGE EN ZONES + VALIDATION ............................... A VENIR
+5. DECOUPAGE EN ZONES + VALIDATION ........................... DISPONIBLE
 ------------------------------------------------------------------
-  Le pipeline propose des zones numerotees ; tu indiques le materiau de
-  chaque zone dans un petit fichier (1 a 2 minutes par asset).
+  Conseille : une image SANS ECLAIRAGE (aplats de couleur, comme un dessin
+  "unlit") rangee a cote, nommee robot01_Front_Unlit.png. Les LED et les
+  zones de couleur seront alors respectees au pixel pres. Ajouter aussi
+  _Back_Unlit, _Left_Unlit, _Right_Unlit si possible (sinon, les cotes non
+  vus sont completes a partir des images eclairees).
+
+    texpipe\zones.bat assets\robot01\robot01_uv.glb
+
+  Verifier robot01_zones_preview.png (zones numerotees, 4 cotes), puis
+  ouvrir robot01_zones.txt et corriger si besoin le materiau et la couleur
+  de chaque zone (1 a 2 minutes). Materiaux : metal_peint, metal_nu,
+  metal_sombre, metal_brosse, chrome, or, cuivre, plastique, caoutchouc,
+  pierre, beton, emissif.
 
 
-6. COMPOSITION DES MATERIAUX ..................................... A VENIR
+6. COMPOSITION DES MATERIAUX ................................. DISPONIBLE
 ------------------------------------------------------------------
-  Materiaux PBR reels + usure, salete, poussiere selon la geometrie.
+    texpipe\materials.bat assets\robot01\robot01_uv.glb
+
+  Options : --wear 0.5 (usure des aretes), --dirt 0.5 (salete dans les
+  creux), --dust 0.2 (poussiere sur le dessus), de 0 a 1.
+  Produit les textures finales, a cote du mesh :
+    T_robot01_BC.png    couleur de base
+    T_robot01_N.png     normal map (DirectX)
+    T_robot01_ORM.png   R = occlusion, G = rugosite, B = metal
+    T_robot01_E.png     emission (zones "emissif")
+  et l'apercu robot01_apercu_materiaux.png.
 
 
-7. EXPORT ET IMPORT UNREAL ....................................... A VENIR
+7. EXPORT ET IMPORT UNREAL ........................... (a la main)
 ------------------------------------------------------------------
-  Textures BaseColor / Normal / ORM et import automatique dans le projet.
+  Mesh : robot01_uv.glb. Dans Unreal : BC en sRGB ; N en Normalmap ;
+  ORM et sans sRGB, compression Masks ; E en sRGB, a multiplier par une
+  intensite d'emission dans le materiau.
 
 
 8. RETOUCHE MANUELLE (optionnel, assets heros) ...................
 ------------------------------------------------------------------
   ArmorPaint ou Blender.
-
-
-EN ATTENDANT LES ETAPES 5 A 7
-------------------------------------------------------------------
-  Apres les etapes 2 et 3, le mesh robot01_uv.glb a ses cartes (normal map,
-  AO, courbure) et l'ancienne texture Tripo reprojetee. Il peut etre texture
-  a la main dans ArmorPaint ou Blender, ou importe tel quel dans Unreal
-  (normal map : aucun reglage, elle est deja dans la convention d'Unreal).
 
 
 EN CAS DE PROBLEME

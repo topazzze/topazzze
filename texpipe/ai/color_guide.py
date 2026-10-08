@@ -548,7 +548,7 @@ def back_project(images, views, pos, nrm, covered, masks=None):
     """Couleur de chaque pixel de texture : moyenne des vues qui le voient,
     pondérée par l'angle (une vue de face compte plus qu'une vue rasante)."""
     size_v = views[0]["mask"].shape[0]
-    acc = np.zeros(pos.shape[:2] + (3,), dtype=np.float32)
+    acc = np.zeros(pos.shape[:2] + (images[0].shape[-1],), dtype=np.float32)
     wsum = np.zeros(pos.shape[:2], dtype=np.float32)
     eps = 2.5 * (2 * ORTHO / size_v)  # tolérance de profondeur : ~2 pixels
     sel = np.nonzero(covered)
