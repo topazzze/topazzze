@@ -2217,6 +2217,20 @@ def conservative_mask(tri_px, h, w):
     return mask
 
 
+_POOL = []
+
+
+def _thread_pool():
+    """Fils de calcul pour les FFT du rangement (numpy les calcule sans
+    bloquer les autres fils) : un par cœur, 8 au plus."""
+    if not _POOL:
+        from concurrent.futures import ThreadPoolExecutor
+
+        n = min(8, os.cpu_count() or 1)
+        _POOL.append(ThreadPoolExecutor(max_workers=n) if n > 1 else None)
+    return _POOL[0]
+
+
 def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, heuristic="contact",
                 fast=False, seed=None, orientations=4, push_trials=24, allow_flip=False,
                 start_scale=None):
@@ -2275,65 +2289,90 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, 
     if allow_flip:
         rotations = rotations + tuple(n_orient + k for k in rotations)
 
+    N = G + 2
+    shape_cache = {}
+    pool = _thread_pool()
+
+    def shape(i, k, scale):
+        """Masque (marge comprise) et anneau de contact de l'îlot i en
+        orientation k : calculés une fois par échelle, réutilisés par tous
+        les essais à cette échelle."""
+        key = (i, k)
+        hit = shape_cache.get(key)
+        if hit is not None:
+            return hit
+        _, pts, tri, _ = shapes[i]
+        pr = rot(pts, k)
+        mn = pr.min(0)
+        ext = (pr.max(0) - mn) * scale
+        w = int(math.ceil(ext[0])) + 2 * r + 1
+        h = int(math.ceil(ext[1])) + 2 * r + 1
+        if w > G or h > G:
+            hit = False
+        else:
+            tp = (rot(tri, k) - mn) * scale + r
+            m = dilate(conservative_mask(tp, h, w), r)
+            ring = None
+            if heuristic == "contact":
+                ring = np.zeros((h + 2, w + 2), dtype=bool)
+                ring[1:-1, 1:-1] = m
+                ring = dilate(ring, 1) & ~ring
+            hit = (m, h, w, mn, ring)
+        shape_cache[key] = hit
+        return hit
+
+    def candidate(occ_f, i, k, scale):
+        sh = shape(i, k, scale)
+        if sh is False:
+            return None
+        m, h, w, mn, ring = sh
+        mp = np.zeros((N, N), dtype=np.float32)
+        mp[:h, :w] = m
+        corr = np.fft.irfft2(occ_f * np.conj(np.fft.rfft2(mp)), s=(N, N))
+        # Positions (dans la grille avec cadre) entièrement à l'intérieur.
+        free = corr[1 : G - h + 2, 1 : G - w + 2] < 0.5
+        if not free.any():
+            return None
+        ys, xs = np.nonzero(free)
+        corner = np.maximum(ys + h, xs + w) * (2 * G) + (ys + h) + (xs + w)
+        if ring is not None:
+            # Contact : cellules de l'anneau autour de l'îlot qui touchent
+            # déjà quelque chose (îlot ou bord). Plus il touche, moins il
+            # laisse de vides.
+            rp = np.zeros((N, N), dtype=np.float32)
+            rp[: h + 2, : w + 2] = ring
+            contact = np.fft.irfft2(occ_f * np.conj(np.fft.rfft2(rp)), s=(N, N))
+            cval = contact[ys, xs]  # anneau décalé d'une cellule
+            score = -np.rint(cval) * (8 * G * G) + corner
+        else:
+            score = corner
+        j = int(np.argmin(score))
+        return (score[j], k, int(xs[j]), int(ys[j]), m, mn)
+
     def attempt(scale, order, picks=None):
         # Grille entourée d'un cadre « occupé » : le bord de la texture compte
         # comme un voisin pour l'heuristique de contact.
         # `picks` : pour les premiers îlots, rang du candidat retenu (0 = le
         # meilleur, 1 = le suivant...) ; sert à explorer d'autres agencements.
-        N = G + 2
+        if shape_cache.get("scale") != scale:
+            shape_cache.clear()  # une seule échelle en mémoire
+            shape_cache["scale"] = scale
         occ = np.zeros((N, N), dtype=np.float32)
         occ[0, :] = occ[-1, :] = occ[:, 0] = occ[:, -1] = 1.0
         out = uv.copy()
         for rank, i in enumerate(order):
-            loops, pts, tri, _ = shapes[i]
-            best = None
-            cands_all = []
+            loops, pts, _, _ = shapes[i]
             occ_f = np.fft.rfft2(occ)
-            for k in rotations:
-                pr = rot(pts, k)
-                mn = pr.min(0)
-                ext = (pr.max(0) - mn) * scale
-                w = int(math.ceil(ext[0])) + 2 * r + 1
-                h = int(math.ceil(ext[1])) + 2 * r + 1
-                if w > G or h > G:
-                    continue
-                tp = (rot(tri, k) - mn) * scale + r
-                m = dilate(conservative_mask(tp, h, w), r)
-                mp = np.zeros((N, N), dtype=np.float32)
-                mp[:h, :w] = m
-                corr = np.fft.irfft2(occ_f * np.conj(np.fft.rfft2(mp)), s=(N, N))
-                # Positions (dans la grille avec cadre) entièrement à l'intérieur.
-                free = corr[1 : G - h + 2, 1 : G - w + 2] < 0.5
-                if not free.any():
-                    continue
-                ys, xs = np.nonzero(free)
-                corner = np.maximum(ys + h, xs + w) * (2 * G) + (ys + h) + (xs + w)
-                if heuristic == "contact":
-                    # Contact : cellules de l'anneau autour de l'îlot qui
-                    # touchent déjà quelque chose (îlot ou bord). Plus il
-                    # touche, moins il laisse de vides.
-                    ring = np.zeros((h + 2, w + 2), dtype=bool)
-                    ring[1:-1, 1:-1] = m
-                    ring = dilate(ring, 1) & ~ring
-                    rp = np.zeros((N, N), dtype=np.float32)
-                    rp[: h + 2, : w + 2] = ring
-                    contact = np.fft.irfft2(occ_f * np.conj(np.fft.rfft2(rp)), s=(N, N))
-                    cval = contact[ys, xs]  # anneau décalé d'une cellule
-                    score = -np.rint(cval) * (8 * G * G) + corner
-                else:
-                    score = corner
-                j = int(np.argmin(score))
-                cand = (score[j], k, int(xs[j]), int(ys[j]), m, mn)
-                cands_all.append(cand)
-                if best is None or cand[0] < best[0]:
-                    best = cand
-            if picks is not None and rank < len(picks) and len(cands_all) > 1:
-                cands_all.sort(key=lambda c: c[0])
-                best = cands_all[min(picks[rank], len(cands_all) - 1)]
-            if best is None:
-                raster_pack.last_fail = (order.index(i), i, shapes[i][3] / total, scale)
+            if pool is not None:
+                cands_all = list(pool.map(lambda k: candidate(occ_f, i, k, scale), rotations))
+            else:
+                cands_all = [candidate(occ_f, i, k, scale) for k in rotations]
+            cands_all = sorted((c for c in cands_all if c is not None), key=lambda c: c[0])
+            if not cands_all:
+                raster_pack.last_fail = (rank, i, shapes[i][3] / total, scale)
                 return None
-            _, k, x, y, m, mn = best
+            pick = picks[rank] if picks is not None and rank < len(picks) else 0
+            _, k, x, y, m, mn = cands_all[min(pick, len(cands_all) - 1)]
             occ[y + 1 : y + 1 + m.shape[0], x + 1 : x + 1 + m.shape[1]] += m
             out[loops] = ((rot(pts, k) - mn) * scale + r + np.array([x, y])) / G
         return out
@@ -2372,7 +2411,8 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, 
     # Recherche au-delà : on vise un remplissage un peu plus haut et l'on
     # essaie d'autres agencements des grandes pièces (2e ou 3e meilleur
     # emplacement / orientation pour l'une des premières), qui décident de
-    # la forme des vides laissés aux suivantes.
+    # la forme des vides laissés aux suivantes. (Avancer dans l'ordre l'îlot
+    # qui ne trouve plus de place a été essayé : moins bon.)
     if not fast and push_trials > 0:
         rng = np.random.default_rng(12345)
         base = orders[0]

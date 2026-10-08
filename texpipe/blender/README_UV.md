@@ -154,16 +154,27 @@ texture utilise Cycles, sur GPU s'il y en a un), texture 2048 :
 |---|---|---|---|---|---|---|
 | Robot de test (cylindres, sphères, boîtes chanfreinées) | 1 354 tris | 59 | 86 % | 0,013 | 0 | ~1 min |
 | DamagedHelmet (Khronos, mesh de jeu triangulé), texture 2K | 15 452 tris | 189 | 67 % | 0,062 | 0 | ~8 min |
-| Archange (Tripo, quads, symétrique), texture 4K | 4 466 tris | 93 par moitié | **75,6 %** | 0,064 | 0 | ~12 min |
+| Archange (Tripo, quads, symétrique), texture 4K | 4 466 tris | 81 par moitié | **77,3 %** | 0,069 | 0 | ~12 min |
 
 Progression mesurée sur l'Archange : 56 % (rangement simple) -> 68 % (îlots
 trop longs coupés) -> 72 % (rangement par contact et recherche) -> 75,6 %
-(coupes ciblées). Pour situer : les guides de production visent 75 % pour les
-props d'environnement et 85 % pour les assets héros ; RizomUV annonce 2 à 4 %
-de gain avec son rangement GPU. Au-delà de ~76 % sur une forme pleine de lames
-effilées comme l'Archange, il faut accepter beaucoup plus de coutures (de
-l'ordre de +80 % selon l'article « Atlas Refinement with Bounded Packing
-Efficiency », SIGGRAPH 2019).
+(coupes ciblées) -> 77,3 % (reflets en miroir et coupes le long des vides).
+
+Pour situer : les guides de production visent ~75 % pour les props et 85 %
+pour les assets héros, mais ce chiffre n'est pas une mesure standard (il
+dépend de la marge et du nombre d'îlots). Ici, il est mesuré marge de 16 px
+comprise : sur l'Archange, les marges seules prennent ~6 % de la texture, et
+le reste du vide est fait d'interstices entre des formes déjà presque
+convexes (enveloppe convexe = surface + 10 %). Au-delà, il faut accepter
+beaucoup plus de coutures (de l'ordre de +80 % selon l'article « Atlas
+Refinement with Bounded Packing Efficiency », SIGGRAPH 2019).
+
+Pistes essayées sans gain sur l'Archange (gardées hors du script) : grille de
+rangement deux fois plus fine, rotations par pas de 45°, appariement
+tête-bêche des grandes pièces, critère de coupe par enveloppe convexe,
+avancer dans l'ordre l'îlot qui ne trouve plus de place.
+
+Le rangement utilise tous les cœurs du processeur (jusqu'à 8).
 
 ## Tests
 
