@@ -5,6 +5,9 @@ rem Exemple : texpipe\uv_optimize.bat robot_low.glb robot_low_uv.glb --texture-s
 
 rem Blender est détecté automatiquement (version la plus récente installée).
 rem Pour forcer un chemin : set "BLENDER=C:\...\blender.exe" avant de lancer.
+if not defined BLENDER if exist "%~dp0..\blender_path.txt" (
+    set /p BLENDER=<"%~dp0..\blender_path.txt"
+)
 if not defined BLENDER (
     for /d %%D in ("%ProgramFiles%\Blender Foundation\Blender *") do (
         if exist "%%D\blender.exe" set "BLENDER=%%D\blender.exe"

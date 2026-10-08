@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 external/
 models/
+blender_path.txt

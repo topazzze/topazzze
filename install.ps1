@@ -2,8 +2,12 @@
 # Lancer : clic droit sur install.bat > Exécuter, ou dans PowerShell :
 #   powershell -ExecutionPolicy Bypass -File install.ps1            (outils + environnement IA)
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Models    (+ modèles IA, ~8 Go)
+#   ... -Blender "D:\Blender\blender.exe"                           (si Blender n'est pas trouvé)
 
-param([switch]$Models)
+param(
+    [switch]$Models,
+    [string]$Blender  # chemin de blender.exe si la détection automatique échoue
+)
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 
@@ -13,32 +17,70 @@ function Refresh-Path {
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
                 [Environment]::GetEnvironmentVariable("Path", "User")
 }
-function Winget($id) {
-    winget install --id $id -e --accept-source-agreements --accept-package-agreements --silent
+function Install-Package($id) {
+    # winget.exe explicitement : PowerShell ne distingue pas les majuscules,
+    # un nom de fonction proche de « winget » se rappellerait lui-même.
+    winget.exe install --id $id -e --accept-source-agreements --accept-package-agreements --silent
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {  # -1978335189 = déjà installé
         throw "Échec de l'installation de $id (code $LASTEXITCODE)"
     }
 }
 
-if (-not (Have winget)) {
+function Find-Blender {
+    # 1. Chemin mémorisé lors d'une installation précédente
+    $saved = Join-Path $Root "blender_path.txt"
+    if (Test-Path $saved) {
+        $p = (Get-Content $saved -Raw).Trim()
+        if (Test-Path $p) { return $p }
+    }
+    # 2. Dans le PATH
+    $cmd = Get-Command blender.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    # 3. Programmes installés (registre), puis emplacements courants (Steam, etc.)
+    $keys = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    $dirs = @(Get-ItemProperty $keys -ErrorAction SilentlyContinue |
+              Where-Object { $_.DisplayName -like "Blender*" -and $_.InstallLocation } |
+              ForEach-Object { $_.InstallLocation })
+    $dirs += Get-ChildItem "$env:ProgramFiles\Blender Foundation\*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+    $dirs += "${env:ProgramFiles(x86)}\Steam\steamapps\common\Blender", "$env:LOCALAPPDATA\Programs\Blender Foundation"
+    foreach ($d in Get-PSDrive -PSProvider FileSystem) {
+        $dirs += "$($d.Root)SteamLibrary\steamapps\common\Blender"
+    }
+    $found = foreach ($d in $dirs) {
+        if ($d -and (Test-Path (Join-Path $d "blender.exe"))) { Join-Path $d "blender.exe" }
+    }
+    return ($found | Sort-Object | Select-Object -Last 1)
+}
+
+if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
     throw "winget est introuvable. Installe « App Installer » depuis le Microsoft Store, puis relance."
 }
 
 # 1. Logiciels ---------------------------------------------------------------
 Step "Git"
-if (-not (Have git)) { Winget "Git.Git" } else { Write-Host "déjà installé" }
+if (-not (Have git)) { Install-Package "Git.Git" } else { Write-Host "déjà installé" }
 
 Step "Blender"
-$blender = Get-ChildItem "$env:ProgramFiles\Blender Foundation\*\blender.exe" -ErrorAction SilentlyContinue |
-           Sort-Object FullName | Select-Object -Last 1
-if (-not $blender) { Winget "BlenderFoundation.Blender" } else { Write-Host "déjà installé : $($blender.FullName)" }
+if ($Blender -and -not (Test-Path $Blender)) { throw "Blender introuvable : $Blender" }
+if (-not $Blender) { $Blender = Find-Blender }
+if (-not $Blender) {
+    Install-Package "BlenderFoundation.Blender"
+    $Blender = Find-Blender
+}
+if (-not $Blender) {
+    throw "Blender introuvable. Relance avec : install.bat -Blender ""C:\chemin\vers\blender.exe"""
+}
+Set-Content -Path (Join-Path $Root "blender_path.txt") -Value $Blender -Encoding ASCII
+Write-Host "Blender : $Blender"
 
 Step "Python 3.11"
 Refresh-Path
 $py = $null
 try { $py = (& py -3.11 -c "import sys; print(sys.executable)") 2>$null } catch {}
 if (-not $py) {
-    Winget "Python.Python.3.11"
+    Install-Package "Python.Python.3.11"
     Refresh-Path
     $py = (& py -3.11 -c "import sys; print(sys.executable)")
 }
@@ -84,9 +126,7 @@ for repo, pat in [
 # 4. Vérification ---------------------------------------------------------------
 Step "Vérification"
 Refresh-Path
-$blender = Get-ChildItem "$env:ProgramFiles\Blender Foundation\*\blender.exe" -ErrorAction SilentlyContinue |
-           Sort-Object FullName | Select-Object -Last 1
-if ($blender) { & $blender.FullName --version | Select-Object -First 1 } else { Write-Warning "Blender introuvable" }
+& $Blender --version | Select-Object -First 1
 & $vpy -c "import torch; print('PyTorch', torch.__version__, '| GPU :', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NON DÉTECTÉ')"
 & $vpy -c "import diffusers, transformers, mvadapter; print('diffusers', diffusers.__version__, '| transformers', transformers.__version__, '| MV-Adapter OK')"
 Write-Host "`nInstallation terminée." -ForegroundColor Green
