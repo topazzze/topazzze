@@ -492,7 +492,7 @@ def align_reference(img, target, size):
     sx, sy = (X1 - X0) / (x1 - x0), (Y1 - Y0) / (y1 - y0)
     W, H = img.size
     nw, nh = max(1, int(round(W * sx))), max(1, int(round(H * sy)))
-    scaled = np.asarray(img.resize((nw, nh), Image.LANCZOS), dtype=np.float32) / 255
+    scaled = np.asarray(img.resize((nw, nh), Image.BILINEAR), dtype=np.float32) / 255  # sans rebond de couleur
     ox = int(round(X0 - x0 * sx))
     oy = int(round(Y0 - y0 * sy))
 
@@ -544,9 +544,11 @@ def use_references(a, images, views, masks, size):
     return used
 
 
-def back_project(images, views, pos, nrm, covered, masks=None):
+def back_project(images, views, pos, nrm, covered, masks=None, best_only=False):
     """Couleur de chaque pixel de texture : moyenne des vues qui le voient,
-    pondérée par l'angle (une vue de face compte plus qu'une vue rasante)."""
+    pondérée par l'angle (une vue de face compte plus qu'une vue rasante).
+    `best_only` : seule la vue qui voit la surface le plus de face décide
+    (pas de mélange entre des images légèrement décalées)."""
     size_v = views[0]["mask"].shape[0]
     acc = np.zeros(pos.shape[:2] + (images[0].shape[-1],), dtype=np.float32)
     wsum = np.zeros(pos.shape[:2], dtype=np.float32)
@@ -554,6 +556,7 @@ def back_project(images, views, pos, nrm, covered, masks=None):
     sel = np.nonzero(covered)
     p, n = pos[sel], nrm[sel]
     masks = masks or [None] * len(images)
+    best_w = np.zeros(len(sel[0]), dtype=np.float32)
     for img, vw, vweight, extra in zip(images, views, VIEW_WEIGHTS, masks):
         if img.shape[0] != size_v:
             img = np.asarray(Image.fromarray((img * 255).astype(np.uint8)).resize((size_v, size_v)), np.float32) / 255
@@ -567,10 +570,18 @@ def back_project(images, views, pos, nrm, covered, masks=None):
         cos = np.clip(n @ vw["cam"][3], 0, 1)
         w = vweight * cos ** 2 * visible
         c = bilinear(img, xy)
-        acc[sel] += c * w[:, None]
-        wsum[sel] += w
+        if best_only:
+            win = w > best_w
+            best_w = np.where(win, w, best_w)
+            cur = acc[sel]
+            cur[win] = c[win]
+            acc[sel] = cur
+            wsum[sel] = np.maximum(wsum[sel], w)
+        else:
+            acc[sel] += c * w[:, None]
+            wsum[sel] += w
     seen = wsum > 1e-4
-    color = acc / np.maximum(wsum, 1e-8)[..., None]
+    color = acc if best_only else acc / np.maximum(wsum, 1e-8)[..., None]
     return color, seen
 
 

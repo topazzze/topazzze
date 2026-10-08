@@ -346,8 +346,15 @@ def project_unlit(unlit, tri_p, tri_n, tri_uv, size, a, view_size=1024):
         oh[ys, xs, lab_px] = 1.0
         onehots.append(oh)
     pos, nrm, covered = cg.texel_maps(tp, tri_n, tri_uv, size)
-    votes, seen = cg.back_project(onehots, vws, pos, nrm, covered, masks)
+    votes, seen = cg.back_project(onehots, vws, pos, nrm, covered, masks, best_only=True)
     return np.argmax(votes, -1), seen & covered, colors
+
+
+def same_gray(l1, l2):
+    """Deux gris (clair et foncé) d'une même pièce : ombrage du dessin, pas
+    deux matériaux. Le noir (clarté < 25) reste à part."""
+    neutral = np.hypot(l1[1], l1[2]) < 10 and np.hypot(l2[1], l2[2]) < 10
+    return bool(neutral and min(l1[0], l2[0]) > 25 and abs(l1[0] - l2[0]) < 30)
 
 
 def classify_flat_colors(pixel_sets, a):
@@ -372,14 +379,15 @@ def classify_flat_colors(pixel_sets, a):
             others = [j for j in alive if j != m and size[j] > size[m]]
             best = None
             for ii, i in enumerate(others):
-                if np.linalg.norm(cl[i] - cl[m]) < a.merge:  # presque la même couleur
+                if np.linalg.norm(cl[i] - cl[m]) < a.merge or same_gray(cl[i], cl[m]):  # même couleur ou même gris
                     best = (0.0, i, i, 0.0)
                     break
                 for j in others[ii + 1 :]:
                     seg = cl[j] - cl[i]
                     t = float(np.dot(cl[m] - cl[i], seg) / max(np.dot(seg, seg), 1e-9))
                     d = float(np.linalg.norm(cl[i] + np.clip(t, 0, 1) * seg - cl[m]))
-                    if 0.1 < t < 0.9 and d < 10 and (best is None or d < best[0]):
+                    # t < 0 : dépassement au-delà d'un aplat (rebond de redimensionnement).
+                    if -0.6 < t < 0.9 and d < 10 and (best is None or d < best[0]):
                         best = (d, i, j, t)
             if best is not None:
                 _, i, j, t = best
@@ -429,18 +437,21 @@ def zones_from_unlit(a, lab, seen, covered, emis, colors):
     étendu depuis les zones voisines."""
     k = len(colors)
     mats = [guess_unlit(srgb_to_lab(c)) for c in colors]
-    lab = np.where(seen, majority(lab, seen, k, 1), lab)  # lissage léger : les LED restent fines
+    for r in (1, 2):  # taches isolées retirées ; les LED (plusieurs pixels de large) restent
+        lab = np.where(seen, majority(lab, seen, k, r), lab)
     hidden = covered & ~seen
     glow = [j for j in range(k) if mats[j] == "emissif"]
     fill_src = seen & ~np.isin(lab, glow) if glow else seen
     onehot = np.stack([(lab == j) & fill_src for j in range(k)], -1).astype(np.float32)
     filled = np.argmax(fill_invalid(onehot, fill_src), -1)
     lab = np.where(seen, lab, filled)
-    if glow and emis is not None:
+    # Secours par les images éclairées seulement si les images unlit laissent
+    # beaucoup de surface invisible (sinon, les reflets y passent pour des LED).
+    if glow and emis is not None and hidden.sum() > 0.2 * covered.sum():
         lab[hidden & emis] = max(glow, key=lambda j: (seen & (lab == j)).sum())
     if hidden.any():
-        log(f"{100 * hidden.sum() / covered.sum():.0f} % de la surface n'est vue par aucune image unlit : "
-            "complétée (ajouter _Back_Unlit, _Left_Unlit, _Right_Unlit pour plus de précision)")
+        log(f"{100 * hidden.sum() / covered.sum():.0f} % de la surface n'est vue par aucune image unlit "
+            "(creux, dessus, dessous...) : complétée par les zones voisines")
     return lab, k, mats
 
 
