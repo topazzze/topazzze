@@ -95,6 +95,8 @@ def parse_args(argv):
     p.add_argument("--gentle-cuts", dest="aggressive_cuts", action="store_false", default=True,
                    help="Coupes ciblées plus prudentes : moins de coutures, remplissage plus faible "
                         "(par défaut, coupes plus nombreuses : sur l'Archange 72 % -> 75,6 %, +15 %% de coutures)")
+    p.add_argument("--no-flip", action="store_true", help="Interdire le retournement en miroir des îlots au rangement")
+    p.add_argument("--fine-grid", action="store_true", help="Affiner le rangement sur une grille deux fois plus fine (plus lent, gain non garanti)")
     p.add_argument("--pack-trials", type=int, default=0, help="Essais de rangement supplémentaires (ordres perturbés), le meilleur est gardé (défaut 0)")
     p.add_argument("--target-fill", type=float, default=0.80, help="Remplissage visé : des coupes ciblées sont ajoutées tant qu'elles le font progresser (défaut 0.80 ; 0 = aucune)")
     p.add_argument("--min-compactness", type=float, default=0.45, help="Compacité min d'un îlot (aire / enveloppe convexe), pour un rangement serré (défaut 0.45)")
@@ -1840,11 +1842,15 @@ class UVOptimizer:
         T = self.topo
         t0 = time.time()
 
+        last = {}
+
         def evaluate():
             charts, islands = self.prepare_islands()
-            placed = raster_pack(self.uv, islands, a.texture_size, a.padding, grid=grid, fast=True)
+            placed = raster_pack(self.uv, islands, a.texture_size, a.padding, grid=grid, fast=True,
+                                 allow_flip=not a.no_flip)
             if placed is None:
                 return 0.0
+            last.update(placed=placed, islands=islands, charts=charts)
             tris = np.concatenate([placed[t] for _, t in islands])
             return float((raster_count(tris * 512, 512) > 0).mean())
 
@@ -1879,6 +1885,14 @@ class UVOptimizer:
                 cands.append((ext[0] * ext[1] - area, c, key))
             cands.sort(reverse=True)
             done_batch = 0
+            # 1) Box Cutter : coupes le long des grands vides de la disposition.
+            for faces in self._void_cuts(last, tried, cut_kw.get("min_part", 0.10), grid):
+                if done_batch >= batch:
+                    break
+                self.ensure_disks()
+                self.unwrap(faces)
+                done_batch += 1
+            # 2) Îlots qui gaspillent le plus leur rectangle englobant.
             for waste, c, key in cands:
                 if done_batch >= batch:
                     break
@@ -1900,6 +1914,80 @@ class UVOptimizer:
         self.write_uv()
         log(f"Coupes ciblées : {best[3]} gardées sur {cuts} essayées, remplissage estimé "
             f"{100 * start:.1f} % -> {100 * best[0]:.1f} % ({time.time() - t0:.0f} s)")
+
+    def _void_cuts(self, last, tried, min_part, grid, n_voids=3):
+        """Box Cutter : dans la dernière disposition, repère les plus grands
+        rectangles vides et coupe un îlot voisin dans le prolongement d'un
+        bord du vide (coupe droite dans le repère de la texture), là où les
+        deux morceaux ont les plus petits rectangles englobants. Renvoie les
+        îlots coupés (au plus un par vide)."""
+        if "placed" not in last:
+            return []
+        T = self.topo
+        placed, islands, charts = last["placed"], last["islands"], last["charts"]
+        G = grid - 2
+        occ = np.zeros((G, G), dtype=bool)
+        boxes = []
+        for loops, tl in islands:
+            m = conservative_mask(placed[tl] * G, G, G)
+            occ |= m
+            p = placed[loops]
+            boxes.append((p.min(0), p.max(0)))
+        free = ~dilate(occ, 1)
+        voids = largest_empty_rectangles(free, n_voids, min_cells=64)
+        out = []
+        used = set()
+        for (x0, y0, x1, y1) in voids:
+            vx0, vy0, vx1, vy1 = x0 / G, y0 / G, x1 / G, y1 / G
+            near = 3.0 / G
+            best = None
+            for c, (lo, hi) in enumerate(boxes):
+                if c in used:
+                    continue
+                if lo[0] > vx1 + near or hi[0] < vx0 - near or lo[1] > vy1 + near or hi[1] < vy0 - near:
+                    continue
+                faces = charts[c]
+                key = hash(tuple(sorted(int(f) for f in faces)))
+                if key in tried or len(faces) < 4:
+                    continue
+                cen = np.array([placed[T.face_loop_start[f] : T.face_loop_start[f + 1]].mean(0) for f in faces])
+                fl = [placed[T.face_loop_start[f] : T.face_loop_start[f + 1]] for f in faces]
+                fmin = np.array([q.min(0) for q in fl])
+                fmax = np.array([q.max(0) for q in fl])
+                farea = T.face_area[faces]
+                whole = (fmax.max(0) - fmin.min(0)).prod()
+                for axis, t in ((0, vx0), (0, vx1), (1, vy0), (1, vy1)):
+                    if not (lo[axis] + near < t < hi[axis] - near):
+                        continue
+                    side = cen[:, axis] > t
+                    if not side.any() or side.all():
+                        continue
+                    frac = farea[side].sum() / farea.sum()
+                    if min(frac, 1 - frac) < min_part:
+                        continue
+                    cost = sum((fmax[m].max(0) - fmin[m].min(0)).prod() for m in (side, ~side))
+                    gain = whole - cost
+                    if gain > 0 and (best is None or gain > best[0]):
+                        best = (gain, c, axis, t, cen, farea, key)
+            if best is None:
+                continue
+            _, c, axis, t, cen, farea, key = best
+            faces = np.asarray(charts[c])
+            dn = (cen[:, axis] - t) / (float(np.abs(cen[:, axis] - t).max()) or 1.0)
+            rel = farea / farea.mean()
+            data = np.stack([np.maximum(0, dn) * 4 * rel, np.maximum(0, -dn) * 4 * rel], 1)
+            label = self._refine(faces, (dn > 0).astype(int), data)
+            if label.min() == label.max():
+                continue
+            boundary = self._boundary_edges(faces, label)
+            if not boundary:
+                continue
+            for e in boundary:
+                self.seam[e] = True
+            tried.add(key)
+            used.add(c)
+            out.append(faces)
+        return out
 
     def _guillotine_cut(self, faces, steps=32, min_part=0.10, min_gain=0.08):
         """Meilleure coupe droite (dans le repère du rectangle minimal de
@@ -1958,16 +2046,28 @@ class UVOptimizer:
         a = self.args
         charts, islands = self.prepare_islands()
         t = time.time()
-        placed, best_fill = None, -1.0
+        placed, best_fill, best_scale, best_heur = None, -1.0, None, "contact"
+        flip = not a.no_flip
         trials = [("contact", None), ("square", None)] + [("contact", s) for s in range(a.pack_trials)]
         for heuristic, seed in trials:
-            res = raster_pack(self.uv, islands, a.texture_size, a.padding, heuristic=heuristic, seed=seed)
+            res = raster_pack(self.uv, islands, a.texture_size, a.padding, heuristic=heuristic, seed=seed,
+                              allow_flip=flip)
             if res is None:
                 continue
             tris = np.concatenate([res[tl] for _, tl in islands])
             fill = float((raster_count(tris * 1024, 1024) > 0).mean())
             if fill > best_fill:
                 placed, best_fill = res, fill
+                best_scale, best_heur = raster_pack.last_scale, heuristic
+        # Affinage sur une grille deux fois plus fine (marges plus justes).
+        if placed is not None and a.fine_grid:
+            res = raster_pack(self.uv, islands, a.texture_size, a.padding, heuristic=best_heur,
+                              allow_flip=flip, grid=1024, start_scale=best_scale, push_trials=8)
+            if res is not None:
+                tris = np.concatenate([res[tl] for _, tl in islands])
+                fill = float((raster_count(tris * 1024, 1024) > 0).mean())
+                if fill > best_fill:
+                    placed, best_fill = res, fill
         if placed is not None:
             self.uv = placed
             self.write_uv()
@@ -2118,7 +2218,8 @@ def conservative_mask(tri_px, h, w):
 
 
 def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, heuristic="contact",
-                fast=False, seed=None, orientations=4, push_trials=24):
+                fast=False, seed=None, orientations=4, push_trials=24, allow_flip=False,
+                start_scale=None):
     """Rangement des îlots selon leur forme réelle (principe de xatlas).
 
     Chaque îlot est rastérisé sur une grille ; il est placé, à 0° ou 90°, à
@@ -2146,8 +2247,11 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, 
         return None
 
     def rot(p, k):
-        """Rotation de k x (360 / n_orient) degrés."""
-        ang = 2.0 * math.pi * k / n_orient
+        """Orientation k : rotation de (k mod n_orient) x (360 / n_orient)
+        degrés, puis retournement en miroir si k >= n_orient."""
+        if k >= n_orient:
+            p = np.stack([-p[..., 0], p[..., 1]], -1)
+        ang = 2.0 * math.pi * (k % n_orient) / n_orient
         cs, sn = math.cos(ang), math.sin(ang)
         return np.stack([cs * p[..., 0] - sn * p[..., 1], sn * p[..., 0] + cs * p[..., 1]], -1)
 
@@ -2168,6 +2272,8 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, 
         orders.append(sorted(range(len(shapes)), key=lambda i: -(extent(i).max() * extent(i).min()) ** 0.5 - shapes[i][3]))
     n_orient = int(orientations) if len(shapes) <= 150 else 4
     rotations = tuple(range(n_orient)) if len(shapes) <= 150 else (0, 1)
+    if allow_flip:
+        rotations = rotations + tuple(n_orient + k for k in rotations)
 
     def attempt(scale, order, picks=None):
         # Grille entourée d'un cadre « occupé » : le bord de la texture compte
@@ -2241,6 +2347,11 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, 
 
     hi = G * math.sqrt(1.0 / total)
     lo = G * math.sqrt(fill_lo / total)
+    if start_scale is not None:
+        # Affinage : on part de l'échelle trouvée sur une grille plus
+        # grossière (exprimée en unités UV), au lieu de tout rechercher.
+        lo = start_scale * G * 0.985
+        hi = start_scale * G * 1.08
     winner = attempt_any(lo)
     while winner is None and lo > 1e-9:
         hi = lo
@@ -2284,6 +2395,7 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25, grid=None, 
                 step = 1.006
             else:
                 lo, winner = target, found
+    raster_pack.last_scale = lo / G
     return winner
 
 
@@ -2384,6 +2496,38 @@ def pair_islands(uv, islands, pad_unit, top=14, min_gain=0.08, res=96):
             out.append((loops, tl))
     pair_islands.last = len(merged)
     return uv, out
+
+
+def largest_empty_rectangles(free, count=3, min_cells=16):
+    """Plus grands rectangles vides d'une grille booléenne (`free` = case
+    libre), par la méthode des histogrammes : renvoie jusqu'à `count`
+    rectangles (x0, y0, x1, y1) disjoints, du plus grand au plus petit."""
+    free = free.copy()
+    out = []
+    for _ in range(count):
+        h, w = free.shape
+        heights = np.zeros(w, dtype=np.int64)
+        best = (0, None)
+        for y in range(h):
+            heights = np.where(free[y], heights + 1, 0)
+            stack = []
+            for x in range(w + 1):
+                cur = heights[x] if x < w else 0
+                start = x
+                while stack and stack[-1][1] >= cur:
+                    sx, sh = stack.pop()
+                    area = sh * (x - sx)
+                    if area > best[0]:
+                        best = (area, (sx, y - sh + 1, x, y + 1))
+                    start = sx
+                if cur > 0 and (not stack or stack[-1][1] < cur):
+                    stack.append((start, cur))
+        if best[1] is None or best[0] < min_cells:
+            break
+        x0, y0, x1, y1 = best[1]
+        out.append(best[1])
+        free[y0:y1, x0:x1] = False
+    return out
 
 
 def erode(mask, r):

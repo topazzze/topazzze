@@ -80,9 +80,11 @@ Formats acceptés : `.glb`, `.gltf`, `.fbx`, `.obj`, `.blend` en entrée ;
    de la surface totale limiterait l'échelle de tout le rangement (il doit
    tenir dans la largeur de la texture). Il est coupé au milieu, sur les
    arêtes les moins visibles. Sur l'Archange : remplissage 56 % -> 68 %.
-11. **Coupes ciblées** (principe de Box Cutter, SIGGRAPH 2018) : les îlots
-   qui gaspillent le plus de place (lames, triangles, encoches) reçoivent une
-   coupe droite là où elle réduit le plus leurs rectangles englobants. Les
+11. **Coupes ciblées** (principe de Box Cutter, SIGGRAPH 2018) : dans la
+   disposition obtenue, les plus grands vides rectangulaires sont repérés et
+   un îlot voisin est coupé dans le prolongement d'un bord du vide ; les îlots
+   qui gaspillent le plus leur rectangle englobant (lames, triangles,
+   encoches) reçoivent aussi une coupe droite là où elle le réduit le plus. Les
    coupes sont faites par lots et vérifiées par de vrais rangements ; on garde
    le meilleur état rencontré. Elles réduisent aussi la distorsion.
    `--gentle-cuts` pour des coupes plus prudentes (moins de coutures).
@@ -90,7 +92,9 @@ Formats acceptés : `.glb`, `.gltf`, `.fbx`, `.obj`, `.blend` en entrée ;
    verticales deviennent exactement droites (l'intérieur est recalculé), sans
    dépasser le seuil de distorsion.
 13. **Rangement par forme réelle** (principe de xatlas) : chaque îlot est
-   rastérisé et placé, sous 4 orientations, là où il touche le plus ses
+   rastérisé et placé, sous 4 orientations et leurs reflets en miroir
+   (sans effet sur les normal maps en MikkTSpace ; `--no-flip` pour
+   l'interdire), là où il touche le plus ses
    voisins (heuristique de contact), y compris dans les creux des autres
    îlots. Une recherche essaie ensuite d'autres agencements des grandes pièces
    pour viser plus haut. Marge en pixels adaptée aux mipmaps (`--padding`, par
