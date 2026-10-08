@@ -4,6 +4,14 @@ Dépliage UV automatique de qualité production pour les meshes low poly de jeu
 (pensé pour les « Smart Low Poly » de Tripo3D : robots, décors industriels,
 pierre). Le script tourne dans Blender, sans interface.
 
+## Conseil Tripo : exporter le LowPoly en quads
+
+Un LowPoly exporté **en quads** depuis Tripo donne des UV bien plus propres
+qu'en triangles (sur l'Archange : 59 à 65 îlots au lieu de 110, bords plus
+nets). Le glTF stocke toujours des triangles, mais le script retrouve les
+quads d'origine d'après l'ordre du fichier, puis restaure la triangulation
+exacte à l'export.
+
 ## Utilisation
 
 Windows (adapter le chemin de Blender, 4.2 LTS ou plus récent) :
@@ -68,12 +76,16 @@ Formats acceptés : `.glb`, `.gltf`, `.fbx`, `.obj`, `.blend` en entrée ;
    (bandeaux de chanfrein, « moustaches ») sont détachées puis redressées.
 9. **Densité de texels uniforme**, réduite de moitié sur les zones cachées
    (`--hidden-density 0.5`), orientation optimale de chaque îlot.
-10. **Rangement par forme réelle** (principe de xatlas) : chaque îlot est
-   rastérisé et placé, à 0° ou 90°, dans le premier creux libre, y compris
+10. **Îlots trop longs coupés en travers** : un îlot plus long que la racine
+   de la surface totale limiterait l'échelle de tout le rangement (il doit
+   tenir dans la largeur de la texture). Il est coupé au milieu, sur les
+   arêtes les moins visibles. Sur l'Archange : remplissage 56 % -> 68 %.
+11. **Rangement par forme réelle** (principe de xatlas) : chaque îlot est
+   rastérisé et placé, sous 4 orientations, dans le premier creux libre, y compris
    dans les concavités des autres îlots. Marge en pixels adaptée aux mipmaps
    (`--padding`, par défaut taille / 256 : 16 px en 4K). Bien plus dense que
    le rangement intégré de Blender (voir les mesures plus bas).
-11. **Contrôle final** : chevauchements recherchés pixel par pixel, îlots
+12. **Contrôle final** : chevauchements recherchés pixel par pixel, îlots
    fautifs redécoupés automatiquement.
 
 ## Symétrie (miroir)

@@ -55,8 +55,11 @@ def check_invariants(rep):
 def test_cylinder_is_three_islands(tmp_path):
     rep, _ = run_optimizer(tmp_path, lambda: bpy.ops.mesh.primitive_cylinder_add(vertices=16))
     check_invariants(rep)
-    assert rep["islands"] == 3  # deux disques + un rectangle
+    # Deux disques + le flanc ; le flanc, trois fois plus long que large,
+    # peut être coupé en deux pour mieux remplir la texture.
+    assert rep["islands"] <= 4
     assert rep["distortion_mean"] < 0.02
+    assert rep["uv_coverage_percent"] > 55
 
 
 def test_open_tube_unrolls_with_one_seam(tmp_path):
@@ -64,11 +67,12 @@ def test_open_tube_unrolls_with_one_seam(tmp_path):
         tmp_path, lambda: bpy.ops.mesh.primitive_cylinder_add(vertices=24, end_fill_type="NOTHING")
     )
     check_invariants(rep)
-    assert rep["islands"] == 1
+    # Déroulé d'une seule couture, le tube donne un rectangle ~3:1 qui ne
+    # couvrirait qu'un tiers de la texture : il est coupé en deux pour la
+    # remplir (au plus 2 îlots, bien plus de pixels).
+    assert rep["islands"] <= 2
     assert rep["distortion_mean"] < 0.02
-    # Un seul rectangle de rapport ~3:1 (2*pi*r / h) : il ne peut couvrir
-    # qu'environ un tiers d'une texture carrée, et doit le faire entièrement.
-    assert rep["uv_coverage_percent"] > 28
+    assert rep["uv_coverage_percent"] > 55
 
 
 def test_sphere_and_torus_are_few_islands(tmp_path):

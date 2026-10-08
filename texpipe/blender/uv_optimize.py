@@ -244,8 +244,23 @@ def preprocess(obj, args):
     # pour elle), puis recopiée en miroir à la fin avec les mêmes UV.
     args.sym = detect_symmetry(bm, args)
     if args.sym:
-        c = args.sym["plane_x"]
-        bmesh.ops.translate(bm, verts=bm.verts, vec=(-c, 0.0, 0.0))
+        bmesh.ops.translate(bm, verts=bm.verts, vec=(-args.sym["plane_x"], 0.0, 0.0))
+
+    # Quads temporaires : le glTF ne stocke que des triangles, or le
+    # redressement des îlots en grille a besoin de quads. Ils sont
+    # reconstruits sur le mesh complet (avant la coupe de symétrie, qui
+    # mélangerait l'ordre des faces). Les arêtes d'origine sont mémorisées
+    # par position pour restaurer la même triangulation à la fin (le bake de
+    # normal map doit voir la triangulation du moteur).
+    original_edges = None
+    n_tri = sum(1 for f in bm.faces if len(f.verts) == 3)
+    quadify = args.quadify if args.quadify is not None else n_tri > 0.6 * max(len(bm.faces), 1)
+    paired = 0
+    if quadify:
+        original_edges = {edge_key(e) for e in bm.edges}
+        paired = rebuild_quads_from_order(bm)
+
+    if args.sym:
         # Visibilité calculée sur le mesh complet, pas sur la moitié.
         args.full_tree = BVHTree.FromBMesh(bm)
         bmesh.ops.bisect_plane(
@@ -260,26 +275,20 @@ def preprocess(obj, args):
             if abs(v.co.x) < diag * 1e-5:
                 v.co.x = 0.0
         bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
-        log(f"Symétrie détectée (plan x = {c:.4f}, écart moyen {100 * args.sym['error_mean']:.3f} % de la taille) : "
+        log(f"Symétrie détectée (plan x = {args.sym['plane_x']:.4f}, écart moyen {100 * args.sym['error_mean']:.3f} % de la taille) : "
             f"une seule moitié est dépliée, l'autre sera superposée en miroir")
-    bm.verts.index_update()
 
-    # Quads temporaires : le glTF ne stocke que des triangles, or le
-    # redressement des îlots en grille a besoin de quads. On mémorise les
-    # arêtes d'origine pour restaurer exactement la même triangulation à la
-    # fin (le bake de normal map doit voir la triangulation du moteur).
-    original_edges = None
-    n_tri = sum(1 for f in bm.faces if len(f.verts) == 3)
-    quadify = args.quadify if args.quadify is not None else n_tri > 0.6 * max(len(bm.faces), 1)
     if quadify:
-        original_edges = {tuple(sorted((e.verts[0].index, e.verts[1].index))) for e in bm.edges}
         bmesh.ops.join_triangles(
             bm,
             faces=[f for f in bm.faces if len(f.verts) == 3],
             angle_face_threshold=math.radians(25),
             angle_shape_threshold=math.radians(35),
         )
-        log(f"Quads temporaires : {n_tri} triangles -> {len(bm.faces)} faces")
+        n_quads = sum(1 for f in bm.faces if len(f.verts) == 4)
+        log(f"Quads temporaires : {n_quads} quads ({paired} retrouvés d'après l'ordre du fichier), "
+            f"{len(bm.faces) - n_quads} autres faces")
+    bm.verts.index_update()
 
     args.sharp_angle = resolve_sharp_angle(bm, args.sharp_angle)
     sharp_limit = math.radians(args.sharp_angle)
@@ -378,6 +387,46 @@ def resolve_sharp_angle(bm, value):
     return angle
 
 
+def rebuild_quads_from_order(bm):
+    """Un mesh en quads exporté en glTF est écrit en triangles, chaque quad
+    donnant deux triangles consécutifs. On les réunit dans cet ordre (avec
+    recalage quand un vrai triangle décale les paires) : on retrouve ainsi
+    exactement les quads d'origine, sans les deviner."""
+    bm.faces.ensure_lookup_table()
+    faces = list(bm.faces)
+    pairs = []
+    k = 0
+    while k < len(faces) - 1:
+        a, b = faces[k], faces[k + 1]
+        if len(a.verts) == 3 and len(b.verts) == 3:
+            shared = [e for e in a.edges if b in e.link_faces]
+            if len(shared) == 1 and len(shared[0].link_faces) == 2 and quad_is_convex(a, b, shared[0]):
+                pairs.append((a, b))
+                k += 2
+                continue
+        k += 1
+    n = 0
+    for a, b in pairs:
+        if a.is_valid and b.is_valid and bmesh.utils.face_join([a, b]) is not None:
+            n += 1
+    return n
+
+
+def quad_is_convex(a, b, edge):
+    """Le quad formé par deux triangles est-il convexe et non replié ?"""
+    va = [v for v in a.verts if v not in edge.verts][0]
+    vb = [v for v in b.verts if v not in edge.verts][0]
+    if a.normal.dot(b.normal) < 0.0:
+        return False
+    d = vb.co - va.co
+    p0, p1 = edge.verts[0].co, edge.verts[1].co
+    n = (a.normal + b.normal).normalized()
+    # Les deux sommets opposés doivent être de part et d'autre de la diagonale.
+    s0 = (p0 - va.co).cross(d).dot(n)
+    s1 = (p1 - va.co).cross(d).dot(n)
+    return s0 * s1 < 0
+
+
 def soften_short_sharp_chains(bm, min_length):
     """Les arêtes vives qui ne forment pas une ligne continue assez longue
     (bruit de génération IA) sont adoucies : elles créeraient sinon des
@@ -412,6 +461,16 @@ def soften_short_sharp_chains(bm, min_length):
     return n
 
 
+def pair_key(a, b):
+    """Identifiant d'une arête par la position de ses sommets (stable même
+    quand la coupe de symétrie renumérote les sommets)."""
+    return frozenset((tuple(round(c, 6) for c in a.co), tuple(round(c, 6) for c in b.co)))
+
+
+def edge_key(e):
+    return pair_key(e.verts[0], e.verts[1])
+
+
 def restore_triangulation(obj, original_edges):
     """Recoupe les quads temporaires selon leur diagonale d'origine. Les UV
     des coins sont conservés tels quels."""
@@ -424,9 +483,9 @@ def restore_triangulation(obj, original_edges):
         if len(f.verts) != 4:
             continue
         v = list(f.verts)
-        if tuple(sorted((v[0].index, v[2].index))) in original_edges:
+        if pair_key(v[0], v[2]) in original_edges:
             pair = (v[0], v[2])
-        elif tuple(sorted((v[1].index, v[3].index))) in original_edges:
+        elif pair_key(v[1], v[3]) in original_edges:
             pair = (v[1], v[3])
         else:
             continue
@@ -1385,6 +1444,64 @@ class UVOptimizer:
             detached += 1
         log(f"Parties fines détachées sur {detached} îlots")
 
+    def split_elongated(self, max_rel_length=1.0, rounds=4):
+        """Un îlot très long limite l'échelle de tout le rangement (il doit
+        tenir dans la largeur de la texture). S'il est plus long que la
+        racine de la surface totale, il est coupé en travers de sa longueur,
+        sur les arêtes les moins visibles : une couture de plus, mais plus de
+        résolution pour tout l'objet."""
+        T = self.topo
+        total = math.sqrt(T.face_area.sum())
+        cut = 0
+        for _ in range(rounds):
+            lab, n = self.labels()
+            charts = self.charts(lab, n)
+            _, _, _, scale = self.chart_stats(lab, n)
+            done = False
+            for c, faces in enumerate(charts):
+                if len(faces) < 4 or scale[c] <= 0:
+                    continue
+                loops = np.concatenate([np.arange(T.face_loop_start[f], T.face_loop_start[f + 1]) for f in faces])
+                pts = self.uv[loops] / scale[c]
+                theta = min_area_rect_angle(pts)
+                cs, sn = math.cos(-theta), math.sin(-theta)
+                r = pts @ np.array([[cs, -sn], [sn, cs]]).T
+                ext = r.max(0) - r.min(0)
+                if ext.max() / total <= max_rel_length:
+                    continue
+                if self._split_across(faces):
+                    cut += 1
+                    done = True
+            if not done:
+                break
+            self.ensure_disks()
+            self.unwrap()
+        if cut:
+            log(f"Îlots trop longs coupés en travers : {cut}")
+
+    def _split_across(self, faces):
+        """Coupe un îlot par un plan perpendiculaire à sa plus grande
+        dimension, au milieu, puis fait glisser la coupe vers les arêtes les
+        moins coûteuses."""
+        T = self.topo
+        faces = np.asarray(faces)
+        area = T.face_area[faces] + 1e-12
+        pts = T.face_center[faces]
+        center = (pts * area[:, None]).sum(0) / area.sum()
+        rel = pts - center
+        _, _, vt = np.linalg.svd(rel * np.sqrt(area)[:, None], full_matrices=False)
+        d = rel @ vt[0]
+        dn = d / (float(np.abs(d).max()) or 1.0)
+        rel_area = area / area.mean()
+        data = np.stack([np.maximum(0, dn) * 4 * rel_area, np.maximum(0, -dn) * 4 * rel_area], 1)
+        label = self._refine(faces, (dn > 0).astype(int), data)
+        if label.min() == label.max():
+            return False
+        boundary = self._boundary_edges(faces, label)
+        for e in boundary:
+            self.seam[e] = True
+        return bool(boundary)
+
     def detach_faces(self, faces):
         """Détache des faces de leur îlot (couture tout autour)."""
         T = self.topo
@@ -1663,19 +1780,31 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25):
         shapes.append((loops, pts, tri, area))
     if total <= 0:
         return None
-    order = sorted(range(len(shapes)), key=lambda i: -shapes[i][3])
 
     def rot(p, k):
-        return p if k == 0 else np.stack([-p[..., 1], p[..., 0]], -1)
+        for _ in range(k % 4):
+            p = np.stack([-p[..., 1], p[..., 0]], -1)
+        return p
 
-    def attempt(scale):
+    def extent(i):
+        e = shapes[i][1].max(0) - shapes[i][1].min(0)
+        return e
+
+    # Plusieurs ordres de placement sont essayés ; on garde le plus dense.
+    orders = [sorted(range(len(shapes)), key=lambda i: -shapes[i][3])]
+    if len(shapes) <= 150:
+        orders.append(sorted(range(len(shapes)), key=lambda i: -extent(i).max()))
+        orders.append(sorted(range(len(shapes)), key=lambda i: -(extent(i).max() * extent(i).min()) ** 0.5 - shapes[i][3]))
+    rotations = (0, 1, 2, 3) if len(shapes) <= 150 else (0, 1)
+
+    def attempt(scale, order):
         occ = np.zeros((G, G), dtype=np.float32)
         out = uv.copy()
         for i in order:
             loops, pts, tri, _ = shapes[i]
             best = None
             occ_f = np.fft.rfft2(occ)
-            for k in (0, 1):
+            for k in rotations:
                 pr = rot(pts, k)
                 mn = pr.min(0)
                 ext = (pr.max(0) - mn) * scale
@@ -1704,25 +1833,29 @@ def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25):
             out[loops] = ((rot(pts, k) - mn) * scale + r + np.array([x, y])) / G
         return out
 
-    hi = G * math.sqrt(1.0 / total)
-    lo = G * math.sqrt(fill_lo / total)
-    best = attempt(lo)
-    while best is None and lo > 1e-9:
-        hi = lo
-        lo *= 0.7
-        best = attempt(lo)
-    if best is None:
-        return None
-    for _ in range(8):
-        mid = math.sqrt(lo * hi)
-        res = attempt(mid)
-        if res is None:
-            hi = mid
-        else:
-            lo, best = mid, res
-        if hi / lo < 1.01:
-            break
-    return best
+    winner, winner_scale = None, 0.0
+    for order in orders:
+        hi = G * math.sqrt(1.0 / total)
+        lo = max(G * math.sqrt(fill_lo / total), winner_scale)
+        best = attempt(lo, order)
+        while best is None and lo > 1e-9:
+            hi = lo
+            lo *= 0.7
+            best = attempt(lo, order)
+        if best is None:
+            continue
+        for _ in range(8):
+            mid = math.sqrt(lo * hi)
+            res = attempt(mid, order)
+            if res is None:
+                hi = mid
+            else:
+                lo, best = mid, res
+            if hi / lo < 1.01:
+                break
+        if lo > winner_scale:
+            winner, winner_scale = best, lo
+    return winner
 
 
 def erode(mask, r):
@@ -2047,6 +2180,7 @@ def run(args):
     opt.ensure_disks()
     opt.unwrap()
     opt.detach_thin_parts()
+    opt.split_elongated()
     # Revalidation : le lissage et le détachement ont remodelé des îlots.
     opt.segment()
     if not args.no_straighten:

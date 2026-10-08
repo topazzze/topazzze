@@ -16,7 +16,8 @@ mesure.
 1. PREPARER UN ASSET DANS TRIPO3D ................................
 ------------------------------------------------------------------
   Pour chaque asset, depuis la MEME generation Tripo, telecharger :
-    - la version Smart Low Poly (.glb)        -> mesh du jeu
+    - la version Smart Low Poly EN QUADS (.glb) -> mesh du jeu
+                                                 (UV bien plus propres qu'en triangles)
     - la version de base, detaillee (.glb)    -> source du relief
     - l'image de reference (.png)             -> lumiere neutre si possible
 
