@@ -47,3 +47,12 @@ def test_background_removal():
     img[10:30, 20:44] = (30, 20, 40)  # objet sombre
     out = np.asarray(cg.remove_background(Image.fromarray(img), 12))
     assert out[20, 30, 3] == 255 and out[2, 2, 3] == 0 and out[55, 5, 3] == 0
+
+
+def test_sibling_references_are_found(tmp_path):
+    for n in ("Robot_Front.jpeg", "Robot_Back.jpeg", "Robot_Left.png", "Robot_Right.jpeg"):
+        (tmp_path / n).write_bytes(b"")
+    found = cg.sibling_references(str(tmp_path / "Robot_Front.jpeg"))
+    assert set(found) == {"back", "left", "right"}
+    assert found["left"].endswith("Robot_Left.png")
+    assert cg.sibling_references(str(tmp_path / "Robot.jpeg")) == {}

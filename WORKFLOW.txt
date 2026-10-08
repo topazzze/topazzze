@@ -76,6 +76,9 @@ mesure.
 ------------------------------------------------------------------
     texpipe\color_guide.bat assets\robot01\robot01_uv.glb assets\robot01\robot01_front.png
 
+  Donner l'image de FACE : les images _Back, _Left, _Right du meme dossier
+  sont trouvees automatiquement et remplacent les vues inventees par l'IA
+  quand elles collent bien a la forme du mesh.
   Le premier lancement telecharge les modeles (~6 Go, dans F:\Pipeline\models).
   Produit :
     _views.png        6 vues generees (face, droite, dos, gauche, dessus, dessous)

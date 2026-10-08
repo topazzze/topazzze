@@ -38,7 +38,11 @@ from imgops import box_blur, fill_invalid, save_png  # noqa: E402
 # dessus et dessous, orthographiques.
 AZIMUTHS = [x - 90 for x in [0, 90, 180, 270, 180, 180]]
 ELEVATIONS = [0, 0, 0, 0, 89.99, -89.99]
-VIEW_NAMES = ["face", "droite", "dos", "gauche", "dessus", "dessous"]
+# Côté de l'objet montré par chaque vue (l'objet regarde vers -Y).
+VIEW_NAMES = ["face", "côté gauche", "dos", "côté droit", "dessus", "dessous"]
+# Images de référence reconnues par leur nom (« robot_Front.jpg »...) et vue
+# correspondante.
+SIDE_VIEWS = {"front": 0, "left": 1, "back": 2, "right": 3}
 VIEW_WEIGHTS = [1.0, 1.0, 1.0, 1.0, 0.5, 0.5]  # dessus / dessous moins fiables
 ORTHO = 0.55
 DISTANCE = 1.8
@@ -72,6 +76,11 @@ def parse_args(argv=None):
     p.add_argument("--guidance", type=float, default=3.0, help="Force du texte (défaut 3.0)")
     p.add_argument("--reference-scale", type=float, default=1.0, help="Force de l'image de référence (défaut 1.0)")
     p.add_argument("--seed", type=int, default=42, help="Graine (même graine = même résultat ; changer pour une autre proposition)")
+    p.add_argument("--references", default="auto", choices=["auto", "off"],
+                   help="auto (défaut) : les images _Back, _Left, _Right à côté de l'image de face remplacent les vues "
+                        "inventées par l'IA quand elles se superposent bien au mesh")
+    p.add_argument("--min-overlap", type=float, default=0.8,
+                   help="Superposition minimale (0-1) d'une image de référence avec la silhouette du mesh (défaut 0.8)")
     p.add_argument("--bg-tolerance", type=int, default=12, help="Détourage du fond de la référence : tolérance par pas (défaut 12)")
     p.add_argument("--base-model", default=None, help="Dépôt Hugging Face du modèle de base (remplace celui de la variante)")
     a = p.parse_args(argv)
@@ -307,12 +316,16 @@ def remove_background(img, tol):
     """Fond uni (blanc, gris...) retiré par remplissage depuis les bords :
     un pixel est du fond s'il touche le fond et lui ressemble à `tol` près
     (pas à pas : suit les dégradés et les ombres douces)."""
-    rgb = np.asarray(img.convert("RGB"), dtype=np.int16)
+    full = img.convert("RGB")
+    small = full.copy()
+    small.thumbnail((1024, 1024), Image.LANCZOS)  # bords nets quelle que soit la taille
+    rgb = np.asarray(small, dtype=np.int16)
     H, W, _ = rgb.shape
     bg = np.zeros((H, W), dtype=bool)
     bg[0, :] = bg[-1, :] = bg[:, 0] = bg[:, -1] = True
     border = np.concatenate([rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]])
     ref = np.median(border, 0)
+    near_ref = np.abs(rgb - ref).max(-1) < 6 * tol  # l'objet ne peut pas devenir du fond
     bg &= np.abs(rgb - ref).max(-1) < 4 * tol
     shifts = ((1, 0), (-1, 0), (0, 1), (0, -1))
     similar = [np.abs(rgb - np.roll(rgb, d, (0, 1))).max(-1) <= tol for d in shifts]
@@ -320,14 +333,16 @@ def remove_background(img, tol):
         grown = bg.copy()
         for _ in range(8):  # plusieurs pas avant de tester la convergence
             for d, sim in zip(shifts, similar):
-                grown |= np.roll(grown, d, (0, 1)) & sim
+                grown |= np.roll(grown, d, (0, 1)) & sim & near_ref
         if (grown == bg).all():
             break
         bg = grown
     alpha = (~bg).astype(np.float32)
     alpha = np.clip(box_blur(alpha, 1) * 1.5 - 0.25, 0, 1)  # bord adouci
-    out = np.dstack([rgb.astype(np.uint8), (alpha * 255).astype(np.uint8)])
-    return Image.fromarray(out, "RGBA")
+    mask = Image.fromarray((alpha * 255).astype(np.uint8)).resize(full.size, Image.BILINEAR)
+    out = full.copy()
+    out.putalpha(mask)
+    return out
 
 
 def preprocess_reference(image, size):
@@ -374,7 +389,7 @@ def generate(a, views, reference):
     pipe, err = None, None
     for base in ([a.base_model] if a.base_model else v["base"]):
         try:
-            pipe = Pipe.from_pretrained(base, torch_dtype=dtype, use_safetensors=True, **kw)
+            pipe = Pipe.from_pretrained(base, torch_dtype=dtype, use_safetensors=True, **kw)  # noqa
             log(f"Modèle de base : {base}")
             break
         except Exception as e:  # dépôt retiré de Hugging Face, réseau...
@@ -391,7 +406,8 @@ def generate(a, views, reference):
     else:
         pipe.to(device=device)
     pipe.cond_encoder.to(device=device, dtype=dtype)
-    pipe.enable_vae_slicing()
+    if hasattr(pipe.vae, "enable_slicing"):  # remplace pipe.enable_vae_slicing (diffusers récents)
+        pipe.vae.enable_slicing()
 
     control = np.stack([np.concatenate([vw["pos"], vw["normal"]], -1) for vw in views])
     control = torch.from_numpy(control).permute(0, 3, 1, 2).to(device=device, dtype=dtype)
@@ -439,7 +455,96 @@ def erode(mask, r):
     return out
 
 
-def back_project(images, views, pos, nrm, covered):
+def sibling_references(path):
+    """Images dos / gauche / droite rangées à côté de l'image de face et
+    nommées pareil (Archange_Front.jpeg -> Archange_Back.jpeg...)."""
+    import re
+
+    folder, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+    m = re.search("front", stem, re.IGNORECASE)
+    if not m:
+        return {}
+    word = m.group(0)
+    found = {}
+    for side in ("back", "left", "right"):
+        rep = side.upper() if word.isupper() else side.capitalize() if word[0].isupper() else side
+        cand = stem[: m.start()] + rep + stem[m.end() :]
+        for e in dict.fromkeys([ext, ".jpg", ".jpeg", ".png", ".webp", ".JPG", ".PNG"]):
+            f = os.path.join(folder, cand + e)
+            if os.path.exists(f):
+                found[side] = f
+                break
+    return found
+
+
+def align_reference(img, target, size):
+    """Recale une image de référence (détourée) sur la silhouette du mesh
+    dans une vue : mise à l'échelle sur les rectangles englobants, puis
+    décalage fin. Renvoie (couleur, masque, superposition 0-1)."""
+    alpha = np.asarray(img)[..., 3] > 127
+    ys, xs = np.nonzero(alpha)
+    ty, tx = np.nonzero(target)
+    if len(xs) == 0 or len(tx) == 0:
+        return None, None, 0.0
+    x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+    X0, X1, Y0, Y1 = tx.min(), tx.max() + 1, ty.min(), ty.max() + 1
+    sx, sy = (X1 - X0) / (x1 - x0), (Y1 - Y0) / (y1 - y0)
+    W, H = img.size
+    nw, nh = max(1, int(round(W * sx))), max(1, int(round(H * sy)))
+    scaled = np.asarray(img.resize((nw, nh), Image.LANCZOS), dtype=np.float32) / 255
+    ox = int(round(X0 - x0 * sx))
+    oy = int(round(Y0 - y0 * sy))
+
+    def place(dx, dy):
+        out = np.zeros((size, size, 4), dtype=np.float32)
+        px, py = ox + dx, oy + dy
+        sx0, sy0 = max(0, -px), max(0, -py)
+        dx0, dy0 = max(0, px), max(0, py)
+        w = min(nw - sx0, size - dx0)
+        h = min(nh - sy0, size - dy0)
+        if w > 0 and h > 0:
+            out[dy0 : dy0 + h, dx0 : dx0 + w] = scaled[sy0 : sy0 + h, sx0 : sx0 + w]
+        return out
+
+    best = (-1.0, 0, 0)
+    for dy in range(-6, 7, 2):
+        for dx in range(-6, 7, 2):
+            m = place(dx, dy)[..., 3] > 0.5
+            iou = (m & target).sum() / max(1, (m | target).sum())
+            if iou > best[0]:
+                best = (iou, dx, dy)
+    out = place(best[1], best[2])
+    return out[..., :3], out[..., 3] > 0.5, float(best[0])
+
+
+def use_references(a, images, views, masks, size):
+    """Remplace les vues inventées par l'IA (dos, côtés) par les images de
+    référence du joueur quand elles se superposent bien au mesh. La gauche et
+    la droite sont échangées si la silhouette le demande nettement (objets
+    asymétriques nommés selon l'autre convention)."""
+    used = {}
+    refs = sibling_references(a.image) if a.image and a.references == "auto" else {}
+    for side, path in refs.items():
+        img = Image.open(path)
+        img = img if img.mode == "RGBA" else remove_background(img, a.bg_tolerance)
+        v = SIDE_VIEWS[side]
+        cands = [v] + ([4 - v] if side in ("left", "right") else [])
+        tries = [(align_reference(img, views[c]["mask"], size), c) for c in cands]
+        (rgb, mask, iou), c = tries[0]
+        if len(tries) > 1 and tries[1][0][2] > iou + 0.05:
+            (rgb, mask, iou), c = tries[1]
+        if iou < a.min_overlap or c in used.values():
+            log(f"Référence {os.path.basename(path)} : superposition {100 * iou:.0f} %, non utilisée")
+            continue
+        images[c] = rgb
+        masks[c] = erode(mask, 2)
+        used[os.path.basename(path)] = c
+        log(f"Référence {os.path.basename(path)} -> vue {VIEW_NAMES[c]} (superposition {100 * iou:.0f} %)")
+    return used
+
+
+def back_project(images, views, pos, nrm, covered, masks=None):
     """Couleur de chaque pixel de texture : moyenne des vues qui le voient,
     pondérée par l'angle (une vue de face compte plus qu'une vue rasante)."""
     size_v = views[0]["mask"].shape[0]
@@ -448,13 +553,16 @@ def back_project(images, views, pos, nrm, covered):
     eps = 2.5 * (2 * ORTHO / size_v)  # tolérance de profondeur : ~2 pixels
     sel = np.nonzero(covered)
     p, n = pos[sel], nrm[sel]
-    for img, vw, vweight in zip(images, views, VIEW_WEIGHTS):
+    masks = masks or [None] * len(images)
+    for img, vw, vweight, extra in zip(images, views, VIEW_WEIGHTS, masks):
         if img.shape[0] != size_v:
             img = np.asarray(Image.fromarray((img * 255).astype(np.uint8)).resize((size_v, size_v)), np.float32) / 255
         xy, depth = project(p, vw["cam"], size_v)
         col = np.clip(xy[:, 0].astype(int), 0, size_v - 1)
         row = np.clip(xy[:, 1].astype(int), 0, size_v - 1)
         inner = erode(vw["mask"], 1)  # pas les bords de silhouette (fond mélangé)
+        if extra is not None:
+            inner &= extra
         visible = inner[row, col] & (depth >= vw["zbuf"][row, col] - eps)
         cos = np.clip(n @ vw["cam"][3], 0, 1)
         w = vweight * cos ** 2 * visible
@@ -502,13 +610,19 @@ def run(a):
         save_png(f"{base}_views.png", np.concatenate(images, 1)[::-1])
 
     size = a.texture_size
+    images = [np.asarray(Image.fromarray((im * 255).astype(np.uint8)).resize((size_v, size_v), Image.LANCZOS),
+                         dtype=np.float32) / 255 if im.shape[0] != size_v else im for im in images]
+    masks = [None] * 6
+    used = use_references(a, images, views, masks, size_v)
+    if used:
+        save_png(f"{base}_views_used.png", np.concatenate(images, 1)[::-1])
     pos, nrm, covered = texel_maps(tri_p, tri_n, tri_uv, size)
-    color, seen = back_project(images, views, pos, nrm, covered)
+    color, seen = back_project(images, views, pos, nrm, covered, masks)
     seen_frac = float(seen[covered].mean()) if covered.any() else 0.0
     color = fill_invalid(color, seen)
     save_png(f"{base}_color_guide.png", color[::-1])
     log(f"Texture guide : {base}_color_guide.png ({100 * seen_frac:.1f} % de la surface vue par au moins une vue)")
-    report = dict(mesh=a.mesh, image=a.image, views=a.views or f"{base}_views.png", variant=a.variant,
+    report = dict(mesh=a.mesh, image=a.image, references_used={k: VIEW_NAMES[v] for k, v in used.items()}, views=a.views or f"{base}_views.png", variant=a.variant,
                   seed=a.seed, prompt=a.prompt, texture_size=size, seen_percent=round(100 * seen_frac, 2),
                   color_guide=f"{base}_color_guide.png", seconds=round(time.time() - t0, 1))
     with open(f"{base}_color_report.json", "w", encoding="utf-8") as fh:
