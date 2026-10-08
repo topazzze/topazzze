@@ -3,10 +3,13 @@ rem Raccourci Windows pour l'optimisation UV.
 rem Usage : texpipe\uv_optimize.bat entree.glb sortie.glb [options...]
 rem Exemple : texpipe\uv_optimize.bat robot_low.glb robot_low_uv.glb --texture-size 4096 --preview apercu.png
 
+rem Dossier du script, mémorisé AVANT les "shift" (qui décalent aussi %0).
+set "HERE=%~dp0"
+
 rem Blender est détecté automatiquement (version la plus récente installée).
 rem Pour forcer un chemin : set "BLENDER=C:\...\blender.exe" avant de lancer.
-if not defined BLENDER if exist "%~dp0..\blender_path.txt" (
-    set /p BLENDER=<"%~dp0..\blender_path.txt"
+if not defined BLENDER if exist "%HERE%..\blender_path.txt" (
+    set /p BLENDER=<"%HERE%..\blender_path.txt"
 )
 if not defined BLENDER (
     for /d %%D in ("%ProgramFiles%\Blender Foundation\Blender *") do (
@@ -36,4 +39,4 @@ shift
 goto collect
 
 :run
-"%BLENDER%" -b --factory-startup -P "%~dp0blender\uv_optimize.py" -- --input "%IN%" --output "%OUT%" %EXTRA%
+"%BLENDER%" -b --factory-startup -P "%HERE%blender\uv_optimize.py" -- --input "%IN%" --output "%OUT%" %EXTRA%
