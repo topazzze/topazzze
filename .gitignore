@@ -5,3 +5,5 @@ __pycache__/
 external/
 models/
 blender_path.txt
+cache/
+tools/

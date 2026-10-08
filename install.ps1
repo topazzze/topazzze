@@ -1,5 +1,7 @@
 ﻿# Installation de tout ce dont le pipeline a besoin (Windows 10/11).
 # Aucun prérequis : ni winget, ni Git, ni droits administrateur.
+# Tout est installé dans le dossier du pipeline (Python, environnement,
+# caches, modèles) : rien n'est écrit sur C:.
 #
 # Lancer : double-clic sur install.bat, ou dans PowerShell :
 #   powershell -ExecutionPolicy Bypass -File install.ps1            (environnement IA)
@@ -14,6 +16,19 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"  # sinon Invoke-WebRequest est très lent
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Root = $PSScriptRoot
+
+# Tout reste dans le dossier du pipeline (ex. F:\Pipeline), rien sur C: :
+# fichiers temporaires, cache pip, Python, modèles IA.
+$Cache = Join-Path $Root "cache"
+$Tmp = Join-Path $Cache "tmp"
+New-Item -ItemType Directory -Force $Tmp | Out-Null
+$env:TEMP = $Tmp
+$env:TMP = $Tmp
+$env:PIP_CACHE_DIR = Join-Path $Cache "pip"
+$ModelsDir = Join-Path $Root "models"
+$env:HF_HOME = Join-Path $ModelsDir "huggingface"
+$env:TORCH_HOME = Join-Path $ModelsDir "torch"
+$PythonDir = Join-Path $Root "tools\python311"
 
 function Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
@@ -60,7 +75,11 @@ function Find-Blender {
 }
 
 function Find-Python {
-    # Python 3.10 à 3.12 (versions compatibles avec PyTorch et MV-Adapter).
+    # Python du pipeline (installé dans son dossier), sinon un Python 3.10 à
+    # 3.12 déjà présent (il ne prend pas de place en plus : le .venv, lui,
+    # est dans le dossier du pipeline).
+    $own = Join-Path $PythonDir "python.exe"
+    if (Test-Path $own) { return $own }
     foreach ($v in "3.11", "3.12", "3.10") {
         try {
             $p = (& py "-$v" -c "import sys; print(sys.executable)" 2>$null)
@@ -93,9 +112,10 @@ $py = Find-Python
 if (-not $py) {
     $installer = Join-Path $env:TEMP "python-3.11.9-amd64.exe"
     Download "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe" $installer
-    Write-Host "Installation de Python 3.11 (pour l'utilisateur courant)..."
+    Write-Host "Installation de Python 3.11 dans $PythonDir ..."
     $p = Start-Process $installer -Wait -PassThru -ArgumentList `
-        "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=0", "Include_test=0"
+        "/quiet", "InstallAllUsers=0", "TargetDir=""$PythonDir""", "PrependPath=0",
+        "Include_launcher=0", "Include_test=0", "Shortcuts=0"
     if ($p.ExitCode -ne 0) { throw "Échec de l'installation de Python (code $($p.ExitCode))" }
     $py = Find-Python
     if (-not $py) { throw "Python installé mais introuvable." }
@@ -107,6 +127,16 @@ Step "Environnement Python (.venv)"
 $venv = Join-Path $Root ".venv"
 $vpy = Join-Path $venv "Scripts\python.exe"
 if (-not (Test-Path $vpy)) { Run $py -m venv $venv }
+# À chaque lancement de ce Python, les caches des modèles pointent vers le
+# dossier du pipeline (Hugging Face, PyTorch), même hors de ce script.
+$site = Join-Path $venv "Lib\site-packages"
+@"
+import os
+_root = r"$Root"
+os.environ.setdefault("HF_HOME", os.path.join(_root, "models", "huggingface"))
+os.environ.setdefault("TORCH_HOME", os.path.join(_root, "models", "torch"))
+os.environ.setdefault("PIP_CACHE_DIR", os.path.join(_root, "cache", "pip"))
+"@ | Set-Content -Path (Join-Path $site "sitecustomize.py") -Encoding UTF8
 Run $vpy -m pip install --upgrade pip wheel
 
 Step "PyTorch avec CUDA (carte NVIDIA, ~3 Go)"
@@ -129,8 +159,7 @@ Run $vpy -m pip install --no-deps -e $mva
 
 # 4. Modèles (optionnel) ---------------------------------------------------------
 if ($Models) {
-    Step "Modèles IA (environ 8 Go)"
-    $env:HF_HOME = Join-Path $Root "models\huggingface"
+    Step "Modèles IA (environ 8 Go, dans $ModelsDir)"
     Run $vpy -c @"
 from huggingface_hub import snapshot_download
 for repo, pat in [
@@ -148,4 +177,6 @@ Step "Vérification"
 & $Blender --version | Select-Object -First 1
 Run $vpy -c "import torch; print('PyTorch', torch.__version__, '| GPU :', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NON DETECTE')"
 Run $vpy -c "import diffusers, transformers, mvadapter; print('diffusers', diffusers.__version__, '| transformers', transformers.__version__, '| MV-Adapter OK')"
-Write-Host "`nInstallation terminée." -ForegroundColor Green
+Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host "`nInstallation terminée. Tout est dans $Root" -ForegroundColor Green
+Write-Host "(Le cache pip dans $Cache peut être supprimé pour gagner ~3 Go.)"
