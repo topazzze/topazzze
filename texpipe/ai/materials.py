@@ -75,6 +75,7 @@ def parse_args(argv=None):
     p.add_argument("--dust", type=float, default=0.2, help="Poussière sur le dessus, 0 à 1 (défaut 0.2)")
     p.add_argument("--scale", type=float, default=1.0, help="Taille des motifs d'usure (défaut 1 ; 2 = deux fois plus gros)")
     p.add_argument("--noise-res", type=int, default=2048, help="Résolution du calcul des motifs (défaut 2048)")
+    p.add_argument("--size", type=int, default=0, help="Résolution des textures (défaut : celle de la normal map)")
     p.add_argument("--seed", type=int, default=1, help="Graine des motifs d'usure")
     a = p.parse_args(argv)
     a.mesh = os.path.abspath(a.mesh)
@@ -192,12 +193,14 @@ def run(a):
     zones = read_zone_file(a.zones_file)
 
     nrm = read_normal16(f"{base}_normal.png")
-    size = nrm.shape[0]
+    size = a.size or nrm.shape[0]
+    if nrm.shape[0] != size:
+        nrm = resize(nrm, size)
     ao = read(f"{base}_ao.png", size)
     curv = read(f"{base}_curvature.png", size)
     height = read(f"{base}_height.png", size) if os.path.exists(f"{base}_height.png") else np.full((size, size), 0.5, np.float32)
     up = read(f"{base}_up.png", size) if os.path.exists(f"{base}_up.png") else np.full((size, size), 0.5, np.float32)
-    zid = np.asarray(Image.open(f"{base}_zones_id.png").convert("L").resize((size, size), Image.NEAREST)).astype(np.int64)
+    zid_native = np.asarray(Image.open(f"{base}_zones_id.png").convert("L")).astype(np.int64)
     log(f"Cartes {size} px, {len(zones)} zones : " + ", ".join(f"{k}={v[0]}" for k, v in sorted(zones.items())))
 
     # Position et normale de la surface pour chaque pixel (motifs 3D).
@@ -214,18 +217,26 @@ def run(a):
     big, mid, fine, brushed = (resize(x, size) for x in (big, mid, fine, brushed))
     log(f"Motifs 3D calculés ({time.time() - t0:.0f} s)")
 
-    # Matériau de base par zone.
+    # Matériau de base par zone, avec des transitions adoucies entre zones
+    # (anticrénelage : la carte des zones est souvent moins fine que la texture).
     color = np.zeros((size, size, 3), np.float32)
     metal = np.zeros((size, size), np.float32)
     rough = np.zeros((size, size), np.float32)
     bump = np.zeros((size, size), np.float32)
     emis = np.zeros((size, size, 3), np.float32)
-    wear_kind = np.zeros((size, size), np.int64)  # 0 rien, 1 métal sous peinture, 2 polissage, 3 éclaircir
+    wk = np.zeros((size, size, 4), np.float32)  # poids : rien, métal sous peinture, polissage, éclaircir
     kinds = {None: 0, "metal": 1, "polish": 2, "light": 3}
     ids = sorted(zones)
+    weights = {}
     for z in ids:
-        m = zid == z
-        if not m.any():
+        w = resize((zid_native == z).astype(np.float32), size)
+        weights[z] = box_blur(w, max(1, size // 2048))
+    total = sum(weights.values())
+    any_zone = total > 0.5
+    norm = np.where(total > 1e-6, 1.0 / np.maximum(total, 1e-6), 0.0)
+    for z in ids:
+        w = weights[z] * norm
+        if not (w > 1e-3).any():
             continue
         mat, col = zones[z]
         pr = PRESETS[mat]
@@ -233,17 +244,17 @@ def run(a):
         if col is not None and mat in COLORED | {"metal_nu", "metal_brosse", "chrome", "or", "cuivre"}:
             c = np.power(np.array(col, np.float32), 2.2)
         if pr.get("emissive"):
-            emis[m] = np.power(np.array(col or (1.0, 1.0, 1.0), np.float32), 2.2)
+            emis += w[..., None] * np.power(np.array(col or (1.0, 1.0, 1.0), np.float32), 2.2)
             c = np.array(pr["color"], np.float32)
-        var = 1 + pr["cvar"] * 2 * (big[m] - 0.5) + pr["cvar"] * (fine[m] - 0.5)
-        color[m] = c * var[:, None]
-        metal[m] = pr["metal"]
-        rough[m] = pr["rough"] + pr["rvar"] * 2 * (mid[m] - 0.5) + 0.05 * (fine[m] - 0.5)
+        var = 1 + pr["cvar"] * 2 * (big - 0.5) + pr["cvar"] * (fine - 0.5)
+        color += w[..., None] * (c * var[..., None])
+        metal += w * pr["metal"]
+        r = pr["rough"] + pr["rvar"] * 2 * (mid - 0.5) + 0.05 * (fine - 0.5)
         if pr.get("brushed"):
-            rough[m] += 0.12 * (brushed[m] - 0.5)
-        bump[m] = pr["bump"]
-        wear_kind[m] = kinds[pr["wear"]]
-    any_zone = np.isin(zid, ids)
+            r = r + 0.12 * (brushed - 0.5)
+        rough += w * r
+        bump += w * pr["bump"]
+        wk[..., kinds[pr["wear"]]] += w
 
     convex = np.clip((curv - 0.5) * 2, 0, 1)
     concave = np.clip((0.5 - curv) * 2, 0, 1)
@@ -251,24 +262,24 @@ def run(a):
     # 1) Arêtes usées.
     if a.wear > 0:
         t = 0.75 - 0.5 * a.wear
-        edge = smoothstep(t, t + 0.15, convex * 1.4 + (mid - 0.5) * 0.9 + (fine - 0.5) * 0.3) * (wear_kind > 0)
-        k = (wear_kind == 1) * edge  # peinture écaillée : métal nu
+        edge = smoothstep(t, t + 0.15, convex * 1.4 + (mid - 0.5) * 0.9 + (fine - 0.5) * 0.3) * (1 - wk[..., 0])
+        k = wk[..., 1] * edge  # peinture écaillée : métal nu
         color = color * (1 - k[..., None]) + BARE_METAL * k[..., None]
         metal = metal * (1 - k) + k
         rough = rough * (1 - k) + 0.28 * k
-        k = (wear_kind == 2) * edge  # métal poli
+        k = wk[..., 2] * edge  # métal poli
         color = color * (1 + 0.6 * k[..., None])
         rough = rough * (1 - 0.45 * k)
-        k = (wear_kind == 3) * edge * 0.6  # éclairci
+        k = wk[..., 3] * edge * 0.6  # éclairci
         color = color * (1 + 0.5 * k[..., None])
-        bump = bump + 0.3 * edge * (wear_kind == 1)  # bord de l'écaille
+        bump = bump + 0.3 * edge * wk[..., 1]  # bord de l'écaille
 
     # 2) Saleté dans les creux et en bas.
     if a.dirt > 0:
         d = (1 - ao) * 0.9 + concave * 0.8 + np.clip(0.25 - height, 0, 0.25) * 2.0
         d = d * (0.5 + big) + (mid - 0.5) * 0.4
         t = 0.9 - 0.6 * a.dirt
-        dm = smoothstep(t, t + 0.35, d) * 0.85 * (wear_kind > 0)
+        dm = smoothstep(t, t + 0.35, d) * 0.85 * (1 - wk[..., 0])
         color = color * (1 - dm[..., None]) + DIRT * dm[..., None]
         metal = metal * (1 - dm)
         rough = rough * (1 - dm) + 0.85 * dm
@@ -277,7 +288,7 @@ def run(a):
     # 3) Poussière sur le dessus.
     if a.dust > 0:
         u = np.clip((up - 0.6) / 0.4, 0, 1) ** 1.5
-        dd = smoothstep(0.3, 0.8, u * (0.6 + big) * (0.7 + 0.6 * fine)) * a.dust * (wear_kind > 0)
+        dd = smoothstep(0.3, 0.8, u * (0.6 + big) * (0.7 + 0.6 * fine)) * a.dust * (1 - wk[..., 0])
         color = color * (1 - dd[..., None]) + DUST * dd[..., None]
         metal = metal * (1 - dd)
         rough = rough * (1 - dd) + 0.95 * dd

@@ -316,7 +316,7 @@ def find_unlit(a):
     return sorted(out, key=lambda t: rank[t[0]])
 
 
-def project_unlit(unlit, tri_p, tri_n, tri_uv, size, a, view_size=1024):
+def project_unlit(unlit, tri_p, tri_n, tri_uv, size, a, view_size=2048):
     """Recale chaque image unlit sur la silhouette du mesh (vue du même côté),
     classe ses couleurs en zones sur l'image même, puis reprojette les zones
     (et non les couleurs : aucun mélange aux bords) sur les UV.
