@@ -46,7 +46,7 @@ from collections import deque
 import bpy  # doit précéder bmesh quand bpy est utilisé comme module Python
 import bmesh
 import numpy as np
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 # Seuils de distorsion (moyenne, 95e centile) par îlot. Repères mesurés :
@@ -83,7 +83,11 @@ def parse_args(argv):
     p.add_argument("--output", required=True, help="Mesh de sortie (.glb, .fbx, .obj ou .blend)")
     p.add_argument("--texture-size", type=int, default=4096, help="Résolution visée (défaut 4096)")
     p.add_argument("--padding", type=int, default=None, help="Marge entre îlots en pixels (défaut : taille/256)")
-    p.add_argument("--sharp-angle", type=float, default=65.0, help="Angle (°) au-delà duquel une arête est vive et devient une couture (défaut 65)")
+    p.add_argument("--sharp-angle", default="auto", help="Angle (°) au-delà duquel une arête est vive et devient une couture. "
+                   "« auto » (défaut) : 65°, relevé automatiquement sur les meshes très facettés (Tripo)")
+    p.add_argument("--symmetry", default="auto", choices=["auto", "mirror", "off"],
+                   help="Symétrie gauche/droite : auto (défaut) = détectée puis appliquée si le mesh est symétrique ; "
+                        "mirror = forcée ; off = chaque côté a ses propres UV (détails asymétriques possibles)")
     p.add_argument("--quality", default="balanced", choices=sorted(PRESETS), help="Compromis coutures / distorsion : seams (moins de coutures), balanced (défaut), distortion (étirement minimal)")
     p.add_argument("--max-distortion", type=float, default=None, help="Distorsion moyenne max par îlot (remplace le préréglage ; 0.10 ≈ 10 %%)")
     p.add_argument("--max-distortion-p95", type=float, default=None, help="Distorsion max au 95e centile par îlot (remplace le préréglage)")
@@ -235,6 +239,29 @@ def preprocess(obj, args):
     bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
     bmesh.ops.dissolve_degenerate(bm, dist=max(diag * 1e-7, 1e-8), edges=bm.edges)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    # Symétrie : on ne garde qu'une moitié, dépliée seule (toute la texture
+    # pour elle), puis recopiée en miroir à la fin avec les mêmes UV.
+    args.sym = detect_symmetry(bm, args)
+    if args.sym:
+        c = args.sym["plane_x"]
+        bmesh.ops.translate(bm, verts=bm.verts, vec=(-c, 0.0, 0.0))
+        # Visibilité calculée sur le mesh complet, pas sur la moitié.
+        args.full_tree = BVHTree.FromBMesh(bm)
+        bmesh.ops.bisect_plane(
+            bm,
+            geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
+            dist=diag * 1e-6,
+            plane_co=(0.0, 0.0, 0.0),
+            plane_no=(1.0, 0.0, 0.0),
+            clear_inner=True,
+        )
+        for v in bm.verts:
+            if abs(v.co.x) < diag * 1e-5:
+                v.co.x = 0.0
+        bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
+        log(f"Symétrie détectée (plan x = {c:.4f}, écart moyen {100 * args.sym['error_mean']:.3f} % de la taille) : "
+            f"une seule moitié est dépliée, l'autre sera superposée en miroir")
     bm.verts.index_update()
 
     # Quads temporaires : le glTF ne stocke que des triangles, or le
@@ -254,6 +281,7 @@ def preprocess(obj, args):
         )
         log(f"Quads temporaires : {n_tri} triangles -> {len(bm.faces)} faces")
 
+    args.sharp_angle = resolve_sharp_angle(bm, args.sharp_angle)
     sharp_limit = math.radians(args.sharp_angle)
     for f in bm.faces:
         f.smooth = True
@@ -270,6 +298,84 @@ def preprocess(obj, args):
     bm.free()
     me.update()
     return original_edges
+
+
+def detect_symmetry(bm, args):
+    """Cherche un plan de symétrie gauche/droite (perpendiculaire à X). Les
+    meshes Tripo générés de face sont presque toujours symétriques."""
+    if args.symmetry == "off" or not bm.verts:
+        return None
+    co = np.array([v.co[:] for v in bm.verts])
+    diag = float(np.linalg.norm(co.max(0) - co.min(0))) or 1.0
+    tree = BVHTree.FromBMesh(bm)
+    rng = np.random.default_rng(args.seed)
+    idx = rng.choice(len(co), min(3000, len(co)), replace=False)
+    best = None
+    for c in (0.0, float((co[:, 0].min() + co[:, 0].max()) / 2), float(np.median(co[:, 0]))):
+        pts = co[idx].copy()
+        pts[:, 0] = 2 * c - pts[:, 0]
+        d = np.array([(tree.find_nearest(Vector(p))[0] - Vector(p)).length for p in pts]) / diag
+        if best is None or d.mean() < best[1].mean():
+            best = (c, d)
+    c, d = best
+    sym = {"plane_x": c, "error_mean": float(d.mean()), "error_p95": float(np.percentile(d, 95))}
+    ok = sym["error_mean"] < 0.001 and sym["error_p95"] < 0.005
+    if not ok:
+        if args.symmetry == "mirror":
+            log(f"ATTENTION : symétrie forcée sur un mesh peu symétrique (écart moyen {100 * sym['error_mean']:.2f} %)")
+            return sym
+        log(f"Pas de symétrie gauche/droite (écart moyen {100 * sym['error_mean']:.2f} %) : dépliage complet")
+        return None
+    return sym
+
+
+def mirror_half(obj, args):
+    """Recrée la moitié manquante en miroir. Les UV sont recopiées à
+    l'identique : les deux côtés partagent les mêmes pixels (densité de
+    texels doublée), et la jonction au plan de symétrie est invisible."""
+    me = obj.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    diag = bbox_diagonal(bm)
+    tol = diag * 1e-5
+    # Copie exacte de la moitié, reflétée en X. Un reflet inverse
+    # l'orientation de chaque face : toutes les copies sont donc retournées,
+    # ce qui est juste par construction (pas d'heuristique). Les UV suivent
+    # les coins et restent identiques à l'original.
+    dup = bmesh.ops.duplicate(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:])
+    new_verts = [g for g in dup["geom"] if isinstance(g, bmesh.types.BMVert)]
+    new_faces = [g for g in dup["geom"] if isinstance(g, bmesh.types.BMFace)]
+    for v in new_verts:
+        v.co.x = -v.co.x
+    bmesh.ops.reverse_faces(bm, faces=new_faces)
+    center = [v for v in bm.verts if abs(v.co.x) < tol]
+    bmesh.ops.remove_doubles(bm, verts=center, dist=tol)
+    # Les arêtes du plan de symétrie redeviennent intérieures : lissées
+    # selon l'angle (sinon une arête vive parasite au milieu du mesh).
+    limit = math.radians(args.sharp_angle)
+    for e in bm.edges:
+        if len(e.link_faces) == 2 and all(abs(v.co.x) < tol * 10 for v in e.verts):
+            e.smooth = e.calc_face_angle(0.0) < limit
+    bmesh.ops.translate(bm, verts=bm.verts, vec=(args.sym["plane_x"], 0.0, 0.0))
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+
+
+def resolve_sharp_angle(bm, value):
+    """Seuil d'arête vive. En « auto » : 65° sur un mesh classique. Sur un
+    low poly très facetté (générateurs IA : un quart des arêtes au-delà de
+    65°), ces angles sont des facettes d'approximation, pas des arêtes
+    dessinées ; le seuil monte alors pour ne garder que les ~5 % d'arêtes les
+    plus vives (bords de plaques, lames), entre 65° et 120°."""
+    if str(value).lower() != "auto":
+        return float(value)
+    ang = np.array([math.degrees(e.calc_face_angle(0.0)) for e in bm.edges if len(e.link_faces) == 2])
+    if len(ang) == 0 or (ang > 65.0).mean() <= 0.10:
+        return 65.0
+    angle = float(np.clip(np.percentile(ang, 95), 65.0, 120.0))
+    log(f"Mesh très facetté ({100 * (ang > 65.0).mean():.0f} % d'arêtes > 65°) : seuil d'arête vive relevé à {angle:.0f}°")
+    return angle
 
 
 def soften_short_sharp_chains(bm, min_length):
@@ -461,7 +567,7 @@ class Topology:
 
     # -- visibilité : occlusion ambiante + orientation -------------------------
     def compute_visibility(self, bm, args):
-        tree = BVHTree.FromBMesh(bm)
+        tree = getattr(args, "full_tree", None) or BVHTree.FromBMesh(bm)
         rng = np.random.default_rng(args.seed)
         n = max(4, args.ao_rays)
         # Directions de l'hémisphère, distribuées en cosinus (fixes pour tous).
@@ -1977,6 +2083,17 @@ def run(args):
     if not args.no_transfer:
         path = transfer_texture(obj, args)
         rep["basecolor_transfer"] = os.path.abspath(path) if path else None
+    if args.sym:
+        mirror_half(obj, args)
+        rep["symmetry"] = {
+            "mode": "mirror",
+            "plane_x": round(args.sym["plane_x"], 5),
+            "error_mean_percent": round(100 * args.sym["error_mean"], 4),
+            "note": "Mesures UV pour une moitié ; l'autre moitié partage les mêmes UV (miroir).",
+        }
+        log("Moitié miroir recréée (UV superposées)")
+    else:
+        rep["symmetry"] = {"mode": "off"}
     if args.preview:
         render_checker_preview(obj, args.preview, args)
         rep["preview"] = os.path.abspath(args.preview)
