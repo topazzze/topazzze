@@ -63,10 +63,18 @@ Formats acceptés : `.glb`, `.gltf`, `.fbx`, `.obj`, `.blend` en entrée ;
    déformé et compact (moins de coutures, moins de fragments).
 7. **Redressement** : les îlots en grille de quads deviennent des rectangles
    parfaits (textures répétées alignées, rangement plus dense).
-8. **Densité de texels uniforme**, réduite de moitié sur les zones cachées
-   (`--hidden-density 0.5`), orientation optimale de chaque îlot, puis
-   rangement serré avec une marge en pixels adaptée aux mipmaps
-   (`--padding`, par défaut taille / 256 : 16 px en 4K).
+8. **Lissage des frontières et détachement des parties fines** : les bords en
+   dents de scie sont lissés, les bandes étroites accrochées aux îlots
+   (bandeaux de chanfrein, « moustaches ») sont détachées puis redressées.
+9. **Densité de texels uniforme**, réduite de moitié sur les zones cachées
+   (`--hidden-density 0.5`), orientation optimale de chaque îlot.
+10. **Rangement par forme réelle** (principe de xatlas) : chaque îlot est
+   rastérisé et placé, à 0° ou 90°, dans le premier creux libre, y compris
+   dans les concavités des autres îlots. Marge en pixels adaptée aux mipmaps
+   (`--padding`, par défaut taille / 256 : 16 px en 4K). Bien plus dense que
+   le rangement intégré de Blender (voir les mesures plus bas).
+11. **Contrôle final** : chevauchements recherchés pixel par pixel, îlots
+   fautifs redécoupés automatiquement.
 
 ## Réglages utiles
 
@@ -92,3 +100,23 @@ Formats acceptés : `.glb`, `.gltf`, `.fbx`, `.obj`, `.blend` en entrée ;
   cachées).
 - `hard_edges_not_seam` doit valoir 0, `flipped_triangles` aussi.
 - `overlap_pixels_percent` : chevauchements, doit être (quasi) nul.
+
+## Mesures de référence
+
+Mesurées sur un CPU de serveur (sans carte graphique ; seul le transfert de
+texture utilise Cycles, sur GPU s'il y en a un), texture 2048 :
+
+| Mesh | Faces | Îlots | Remplissage | Distorsion moy. | Chevauchements | Durée |
+|---|---|---|---|---|---|---|
+| Robot de test (cylindres, sphères, boîtes chanfreinées) | 1 354 tris | 59 | 86 % | 0,013 | 0 | ~1 min |
+| DamagedHelmet (Khronos, mesh de jeu triangulé) | 15 452 tris | 189 | 67 % | 0,062 | 0 | ~8 min |
+
+À titre de comparaison, le rangement intégré de Blender plafonnait à 47-49 %
+de remplissage sur le casque, quels que soient ses réglages.
+
+## Tests
+
+```bash
+pip install bpy numpy pytest     # bpy = Blender comme module Python
+pytest tests/
+```

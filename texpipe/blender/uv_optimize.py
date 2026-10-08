@@ -528,6 +528,7 @@ class UVOptimizer:
             f"{int(self.topo.sharp.sum())} arêtes vives ({time.time() - t:.1f} s)")
         self.seam = self.topo.mandatory.copy()
         self.uv = np.zeros((self.topo.L, 2))
+        self.shape_res = 192
         self.soften_tiny_hard_islands()
         self.unwrap_method = "MINIMUM_STRETCH"
         props = bpy.ops.uv.unwrap.get_rna_type().properties
@@ -1053,13 +1054,14 @@ class UVOptimizer:
         flips = np.bincount(tri_lab, weights=flipped.astype(float), minlength=n)
         return mean, p95, flips, scale
 
-    def chart_shape(self, lab, n, ids=None, res=192):
+    def chart_shape(self, lab, n, ids=None, res=None):
         """Compacité (aire UV / aire de l'enveloppe convexe) et
         auto-chevauchement de chaque îlot, mesurés dans son propre repère UV.
         Un îlot peu compact (bras fins, formes en Y) gaspille la texture au
         rangement ; un îlot qui se chevauche donnerait deux zones du mesh
         sur les mêmes pixels."""
         T = self.topo
+        res = res or self.shape_res
         comp = np.ones(n)
         overlap = np.zeros(n, dtype=bool)
         order = np.argsort(lab[T.tri_face], kind="stable")
@@ -1271,6 +1273,13 @@ class UVOptimizer:
             detached += 1
         log(f"Parties fines détachées sur {detached} îlots")
 
+    def detach_faces(self, faces):
+        """Détache des faces de leur îlot (couture tout autour)."""
+        T = self.topo
+        for f in faces:
+            for e in T.face_edges[f]:
+                self.seam[e] = True
+
     def straighten(self):
         """Redresse les îlots entièrement en quads (grilles) en rectangles."""
         T = self.topo
@@ -1399,7 +1408,9 @@ class UVOptimizer:
         T = self.topo
         cover = np.zeros((res, res), dtype=np.int32)
         owner = np.full((res, res), -1, dtype=np.int64)
+        owner_tri = np.full((res, res), -1, dtype=np.int64)
         overlap_pairs = set()
+        self.overlap_tris = set()
         uv = self.uv[T.tri_loops] * res
         tri_lab = lab[T.tri_face]
         for t in range(len(uv)):
@@ -1432,11 +1443,15 @@ class UVOptimizer:
             if not inside.any():
                 continue
             clash = inside & (sub_owner >= 0) & (cover[y0:y1, x0:x1] > 0)
+            sub_tri = owner_tri[y0:y1, x0:x1]
             if clash.any():
                 for o in np.unique(sub_owner[clash]):
                     overlap_pairs.add((int(o), int(c)))
+                self.overlap_tris.add(int(t))
+                self.overlap_tris.update(int(x) for x in np.unique(sub_tri[clash]) if x >= 0)
             cover[y0:y1, x0:x1] += inside
             sub_owner[inside] = c
+            sub_tri[inside] = t
         return cover, owner, overlap_pairs
 
     def report(self, elapsed):
@@ -1926,17 +1941,22 @@ def run(args):
         opt.straighten()
     opt.layout()
 
-    # Réparation : un îlot qui se chevauche lui-même est redécoupé.
-    for _ in range(3):
+    # Réparation : un îlot qui se chevauche lui-même est redécoupé (contrôle
+    # fin) ; en dernier recours, les faces fautives sont détachées.
+    opt.shape_res = 768
+    for attempt in range(4):
         lab, n = opt.labels()
         _, _, pairs = opt.rasterize(lab, 1024)
         selfo = sorted({p[0] for p in pairs if p[0] == p[1]})
         if not selfo:
             break
         log(f"Réparation de {len(selfo)} îlot(s) qui se chevauchent")
-        charts = opt.charts(lab, n)
-        for c in selfo:
-            opt.split_chart(charts[c], evaluate=True)
+        if attempt < 2:
+            charts = opt.charts(lab, n)
+            for c in selfo:
+                opt.split_chart(charts[c], evaluate=True)
+        else:
+            opt.detach_faces({int(opt.topo.tri_face[t]) for t in opt.overlap_tris})
         opt.ensure_disks()
         opt.unwrap()
         opt.layout()
