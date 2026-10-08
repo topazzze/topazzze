@@ -114,6 +114,12 @@ def parse_args(argv):
         args.max_distortion_p95 = preset[1]
     if args.padding is None:
         args.padding = max(4, args.texture_size // 256)
+    # Chemins absolus dès le départ : Blender résout les chemins relatifs
+    # depuis la racine du disque (ex. C:\), pas depuis le dossier courant.
+    for name in ("input", "output", "report", "layout", "preview", "save_blend"):
+        value = getattr(args, name)
+        if value:
+            setattr(args, name, os.path.abspath(value))
     base = os.path.splitext(args.output)[0]
     if args.report is None:
         args.report = base + "_uv_report.json"
