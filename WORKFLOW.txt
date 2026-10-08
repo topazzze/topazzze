@@ -125,7 +125,7 @@ mesure.
 7. EXPORT ET IMPORT UNREAL ........................... (a la main)
 ------------------------------------------------------------------
   Mesh : robot01_uv.glb. Dans Unreal : BC en sRGB ; N en Normalmap ;
-  ORM et sans sRGB, compression Masks ; E en sRGB, a multiplier par une
+  ORM sans sRGB, compression Masks ; E en sRGB, a multiplier par une
   intensite d'emission dans le materiau.
 
 
