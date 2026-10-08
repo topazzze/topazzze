@@ -83,7 +83,8 @@ def parse_args(argv):
     p.add_argument("--output", required=True, help="Mesh de sortie (.glb, .fbx, .obj ou .blend)")
     p.add_argument("--texture-size", type=int, default=4096, help="Résolution visée (défaut 4096)")
     p.add_argument("--padding", type=int, default=None, help="Marge entre îlots en pixels (défaut : taille/256)")
-    p.add_argument("--sharp-angle", type=float, default=65.0, help="Angle (°) au-delà duquel une arête est vive et devient une couture (défaut 65)")
+    p.add_argument("--sharp-angle", default="auto", help="Angle (°) au-delà duquel une arête est vive et devient une couture. "
+                   "« auto » (défaut) : 65°, relevé automatiquement sur les meshes très facettés (Tripo)")
     p.add_argument("--quality", default="balanced", choices=sorted(PRESETS), help="Compromis coutures / distorsion : seams (moins de coutures), balanced (défaut), distortion (étirement minimal)")
     p.add_argument("--max-distortion", type=float, default=None, help="Distorsion moyenne max par îlot (remplace le préréglage ; 0.10 ≈ 10 %%)")
     p.add_argument("--max-distortion-p95", type=float, default=None, help="Distorsion max au 95e centile par îlot (remplace le préréglage)")
@@ -254,6 +255,7 @@ def preprocess(obj, args):
         )
         log(f"Quads temporaires : {n_tri} triangles -> {len(bm.faces)} faces")
 
+    args.sharp_angle = resolve_sharp_angle(bm, args.sharp_angle)
     sharp_limit = math.radians(args.sharp_angle)
     for f in bm.faces:
         f.smooth = True
@@ -270,6 +272,22 @@ def preprocess(obj, args):
     bm.free()
     me.update()
     return original_edges
+
+
+def resolve_sharp_angle(bm, value):
+    """Seuil d'arête vive. En « auto » : 65° sur un mesh classique. Sur un
+    low poly très facetté (générateurs IA : un quart des arêtes au-delà de
+    65°), ces angles sont des facettes d'approximation, pas des arêtes
+    dessinées ; le seuil monte alors pour ne garder que les ~5 % d'arêtes les
+    plus vives (bords de plaques, lames), entre 65° et 120°."""
+    if str(value).lower() != "auto":
+        return float(value)
+    ang = np.array([math.degrees(e.calc_face_angle(0.0)) for e in bm.edges if len(e.link_faces) == 2])
+    if len(ang) == 0 or (ang > 65.0).mean() <= 0.10:
+        return 65.0
+    angle = float(np.clip(np.percentile(ang, 95), 65.0, 120.0))
+    log(f"Mesh très facetté ({100 * (ang > 65.0).mean():.0f} % d'arêtes > 65°) : seuil d'arête vive relevé à {angle:.0f}°")
+    return angle
 
 
 def soften_short_sharp_chains(bm, min_length):

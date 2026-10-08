@@ -82,7 +82,7 @@ Formats acceptés : `.glb`, `.gltf`, `.fbx`, `.obj`, `.blend` en entrée ;
 |---|---|---|
 | `--quality` | `balanced` | `seams` = moins de coutures, `distortion` = étirement minimal |
 | `--texture-size` | 4096 | Sert à la marge en pixels et au calcul de densité |
-| `--sharp-angle` | 65 | Baisser (ex. 45) pour plus d'arêtes vives sur du très anguleux |
+| `--sharp-angle` | auto | 65°, relevé seul sur les meshes très facettés (Tripo : ~115°) ; ou une valeur fixe |
 | `--hidden-density` | 0.5 | 1.0 = même résolution partout |
 | `--front` | `-Y` | Face avant du mesh (convention glTF : -Y dans Blender) |
 | `--min-compactness` | 0.45 | Monter pour un rangement plus serré (plus d'îlots) |
