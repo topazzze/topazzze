@@ -481,12 +481,17 @@ class Topology:
             occ[vi] = hits / n
         front = {"-Y": (0, -1, 0), "+Y": (0, 1, 0), "-X": (-1, 0, 0), "+X": (1, 0, 0)}[args.front]
         front = np.array(front, dtype=np.float64)
-        nrm = self.vert_no
-        facing_back = np.clip(-(nrm @ front), 0, 1)
-        facing_down = np.clip(-nrm[:, 2], 0, 1)
-        dir_w = np.clip(1.0 - 0.4 * facing_back - 0.55 * facing_down, 0.15, 1.0)
-        self.vert_vis = (1.0 - occ) * dir_w
-        self.face_vis = np.array([self.vert_vis[vs].mean() for vs in self.face_verts])
+
+        def direction_weight(nrm):
+            # En jeu, le dessous d'un objet n'est presque jamais vu ; le dos
+            # l'est souvent (le joueur tourne autour), il n'est que peu pénalisé.
+            facing_back = np.clip(-(nrm @ front), 0, 1)
+            facing_down = np.clip(-nrm[:, 2], 0, 1)
+            return np.clip(1.0 - 0.3 * facing_back - 0.8 * facing_down, 0.1, 1.0)
+
+        self.vert_vis = (1.0 - occ) * direction_weight(self.vert_no)
+        face_occ = np.array([occ[vs].mean() for vs in self.face_verts])
+        self.face_vis = (1.0 - face_occ) * direction_weight(self.face_no)
 
     # -- coût d'une couture sur chaque arête -----------------------------------
     def compute_seam_cost(self, args):
@@ -1013,7 +1018,6 @@ class UVOptimizer:
         tri_lab = lab[T.tri_face]
         n = lab.max() + 1
         w = np.where(T.tri_ok, T.tri_area, 0.0)
-        uv_area = 0.5 * det * np.where(T.tri_ok, 1, 0) * (D[:, 0, 0] * 0 + 1)
         # det(J) = aire UV / aire 3D (signée)
         signed_uv = det * T.tri_area
         sum3 = np.bincount(tri_lab, weights=w, minlength=n)
@@ -1028,7 +1032,6 @@ class UVOptimizer:
         flipped = (det * sgn[tri_lab] < 0) & T.tri_ok & (np.abs(det) > 1e-12 * (s * s + 1e-30))
         dist = np.where(flipped, 3.0, dist)
         dist = np.where(T.tri_ok, dist, 0.0)
-        del uv_area
         return dist, w, flipped, scale
 
     def chart_stats(self, lab, n):
@@ -1189,6 +1192,85 @@ class UVOptimizer:
         lab, n = self.labels()
         log(f"Fusion : {merged} îlots recollés, {n} îlots restants ({time.time() - t:.1f} s)")
 
+    def smooth_boundaries(self, passes=3):
+        """Lissage des frontières entre îlots : une face de bordure qui touche
+        davantage un îlot voisin que le sien y est transférée (jamais à
+        travers une couture obligatoire). Supprime les dents de scie qui
+        gaspillent de la place au rangement et allongent les coutures."""
+        T = self.topo
+        lab, n = self.labels()
+        slit = self.seam & ~T.mandatory
+        slit &= np.array([f0 >= 0 and f1 >= 0 and lab[f0] == lab[f1] for f0, f1 in T.edge_faces])
+        moved_total = 0
+        for _ in range(passes):
+            moved = 0
+            new = lab.copy()
+            for f in range(T.F):
+                counts = {}
+                for e in T.face_edges[f]:
+                    if T.mandatory[e] or slit[e]:
+                        continue
+                    for g in T.edge_faces[e]:
+                        if g >= 0 and g != f:
+                            counts[lab[g]] = counts.get(lab[g], 0) + 1
+                own = counts.get(lab[f], 0)
+                best = max(counts.items(), key=lambda kv: kv[1], default=(lab[f], 0))
+                if best[0] != lab[f] and best[1] > own and best[1] >= 2:
+                    new[f] = best[0]
+                    moved += 1
+            lab = new
+            moved_total += moved
+            if not moved:
+                break
+        if moved_total:
+            for e in range(T.E):
+                f0, f1 = T.edge_faces[e]
+                between = f0 >= 0 and f1 >= 0 and lab[f0] != lab[f1]
+                self.seam[e] = T.mandatory[e] or slit[e] or between
+        log(f"Lissage des frontières : {moved_total} faces réattribuées")
+
+    def detach_thin_parts(self, res=160, radius=2):
+        """Repère, par ouverture morphologique dans l'espace UV, les bandes
+        étroites accrochées aux îlots (« moustaches », bandeaux de chanfrein)
+        et les détache : redressées ensuite en rectangles, elles se rangent
+        dans les interstices au lieu d'agrandir l'encombrement de l'îlot."""
+        T = self.topo
+        lab, n = self.labels()
+        charts = self.charts(lab, n)
+        total = T.face_area.sum()
+        detached = 0
+        for c, faces in enumerate(charts):
+            if len(faces) < 8 or T.face_area[faces].sum() < 0.002 * total:
+                continue
+            tris = np.nonzero(np.isin(T.tri_face, faces))[0]
+            uv = self.uv[T.tri_loops[tris]]
+            lo = uv.reshape(-1, 2).min(0)
+            ext = float((uv.reshape(-1, 2).max(0) - lo).max()) or 1.0
+            px = (uv - lo) / ext * (res - 1)
+            mask = raster_count(px, res) > 0
+            opened = dilate(erode(mask, radius), radius)
+            thin_px = mask & ~opened
+            if thin_px.sum() < 0.03 * mask.sum():
+                continue
+            cen = px.mean(1)
+            ix = np.clip(cen[:, 0].astype(int), 0, res - 1)
+            iy = np.clip(cen[:, 1].astype(int), 0, res - 1)
+            tri_thin = thin_px[iy, ix]
+            thin_faces = set(T.tri_face[tris][tri_thin].tolist())
+            # Une face n'est « fine » que si tous ses triangles le sont.
+            thin_faces -= set(T.tri_face[tris][~tri_thin].tolist())
+            if not thin_faces or T.face_area[list(thin_faces)].sum() < 0.01 * T.face_area[faces].sum():
+                continue
+            for f in thin_faces:
+                for e in T.face_edges[f]:
+                    f0, f1 = T.edge_faces[e]
+                    if f0 < 0 or f1 < 0:
+                        continue
+                    if (f0 in thin_faces) != (f1 in thin_faces) and lab[f0] == lab[f1] == c:
+                        self.seam[e] = True
+            detached += 1
+        log(f"Parties fines détachées sur {detached} îlots")
+
     def straighten(self):
         """Redresse les îlots entièrement en quads (grilles) en rectangles."""
         T = self.topo
@@ -1217,7 +1299,11 @@ class UVOptimizer:
             self.read_uv(faces)
             mean, p95, flips, _ = self.chart_stats(lab, n)
             limit = max(mean0[c] + 0.03, self.args.max_distortion)
-            if mean[c] <= limit and p95[c] <= self.args.max_distortion_p95 and flips[c] == 0:
+            ok = mean[c] <= limit and p95[c] <= self.args.max_distortion_p95 and flips[c] == 0
+            if ok:
+                _, overlap = self.chart_shape(lab, n, [c])
+                ok = not overlap[c]
+            if ok:
                 done += 1
             else:
                 for l, v in saved.items():
@@ -1259,7 +1345,7 @@ class UVOptimizer:
         area = np.bincount(lab, weights=T.face_area, minlength=n)
         vis = np.bincount(lab, weights=T.face_vis * T.face_area, minlength=n) / np.maximum(area, 1e-20)
         hd = float(np.clip(a.hidden_density, 0.05, 1.0))
-        tvis = np.clip((vis - 0.12) / (0.45 - 0.12), 0, 1)
+        tvis = np.clip((vis - 0.25) / (0.6 - 0.25), 0, 1)
         tvis = tvis * tvis * (3 - 2 * tvis)
         density = hd + (1 - hd) * tvis
         for c, faces in enumerate(charts):
@@ -1277,10 +1363,22 @@ class UVOptimizer:
         self.chart_density_factor = density
         self.chart_visibility = vis
 
+        t = time.time()
+        islands = []
+        for faces in charts:
+            loops = np.concatenate([np.arange(T.face_loop_start[f], T.face_loop_start[f + 1]) for f in faces])
+            tris = np.nonzero(np.isin(T.tri_face, faces))[0]
+            islands.append((loops, T.tri_loops[tris]))
+        placed = raster_pack(self.uv, islands, a.texture_size, a.padding)
+        if placed is not None:
+            self.uv = placed
+            self.write_uv()
+            log(f"Rangement par forme réelle : {time.time() - t:.1f} s")
+            return
+        log("Rangement par forme réelle impossible, repli sur le rangement de Blender")
         for f in self.bm.faces:
             f.select_set(True)
         bmesh.update_edit_mesh(self.me, loop_triangles=False, destructive=False)
-        margin = a.padding / float(a.texture_size)
         bpy.ops.uv.pack_islands(
             udim_source="CLOSEST_UDIM",
             rotate=True,
@@ -1288,7 +1386,7 @@ class UVOptimizer:
             scale=True,
             merge_overlap=False,
             margin_method="FRACTION",
-            margin=margin,
+            margin=a.padding / float(a.texture_size),
             shape_method="CONCAVE",
         )
         self.refresh_bm()
@@ -1325,11 +1423,15 @@ class UVOptimizer:
             # Marge négative : on ignore les pixels à cheval sur une arête
             # partagée entre deux triangles voisins.
             inside = (l1 > 1e-4) & (l2 > 1e-4) & (l3 > 1e-4)
-            if not inside.any():
-                continue
             sub_owner = owner[y0:y1, x0:x1]
             c = tri_lab[t]
-            clash = inside & (sub_owner >= 0)
+            # Pour l'image et le taux de remplissage, les pixels sur les
+            # arêtes comptent aussi.
+            touch = (l1 > -1e-3) & (l2 > -1e-3) & (l3 > -1e-3) & (sub_owner < 0)
+            sub_owner[touch] = c
+            if not inside.any():
+                continue
+            clash = inside & (sub_owner >= 0) & (cover[y0:y1, x0:x1] > 0)
             if clash.any():
                 for o in np.unique(sub_owner[clash]):
                     overlap_pairs.add((int(o), int(c)))
@@ -1350,7 +1452,6 @@ class UVOptimizer:
         px_per_m = scale * a.texture_size
         density_norm = px_per_m / np.maximum(self.chart_density_factor, 1e-6)
         dist_tri, w, _, _ = self.tri_distortion(lab)
-        tri_lab = lab[T.tri_face]
         ok_w = w > 0
         weighted = lambda x: float(np.average(x, weights=area + 1e-20))
         rep = {
@@ -1363,7 +1464,7 @@ class UVOptimizer:
             "seam_edges": int(self.seam.sum()),
             "hard_edges": int(T.sharp.sum()),
             "hard_edges_not_seam": int((T.sharp & ~self.seam).sum()),
-            "uv_coverage_percent": round(100.0 * float((cover > 0).mean()), 2),
+            "uv_coverage_percent": round(100.0 * float((owner >= 0).mean()), 2),
             "overlap_pixels_percent": round(100.0 * float((cover > 1).mean()), 4),
             "islands_self_overlapping": [int(x) for x in self_overlap],
             "island_pairs_overlapping": [[int(x), int(y)] for x, y in cross_overlap],
@@ -1393,8 +1494,128 @@ class UVOptimizer:
             status = "ATTENTION"
         rep["status"] = status
         rep["warnings"] = warnings
-        del tri_lab
         return rep, cover, owner
+
+
+def conservative_mask(tri_px, h, w):
+    """Masque de toutes les cellules touchées par les triangles (centres
+    couverts + points échantillonnés le long des arêtes) : aucune partie
+    d'un îlot, même un triangle plus fin qu'une cellule, n'est oubliée."""
+    mask = raster_count(tri_px, max(h, w))[:h, :w] > 0
+    edges = np.concatenate([tri_px[:, [0, 1]], tri_px[:, [1, 2]], tri_px[:, [2, 0]]])
+    length = np.linalg.norm(edges[:, 1] - edges[:, 0], axis=1)
+    k = int(max(2, np.ceil(length.max() * 2) + 1)) if len(length) else 2
+    tt = np.linspace(0, 1, k)
+    pts = edges[:, 0, None, :] + (edges[:, 1] - edges[:, 0])[:, None, :] * tt[None, :, None]
+    ix = np.clip(np.floor(pts[..., 0]).astype(int), 0, w - 1).ravel()
+    iy = np.clip(np.floor(pts[..., 1]).astype(int), 0, h - 1).ravel()
+    mask[iy, ix] = True
+    return mask
+
+
+def raster_pack(uv, islands, texture_size, padding_px, fill_lo=0.25):
+    """Rangement des îlots selon leur forme réelle (principe de xatlas).
+
+    Chaque îlot est rastérisé sur une grille ; il est placé, à 0° ou 90°, à
+    la position libre la plus proche du coin (les collisions pour toutes les
+    positions sont calculées d'un coup par corrélation FFT). L'échelle
+    globale est la plus grande pour laquelle tout rentre (dichotomie).
+    Renvoie les nouveaux UV, ou None en cas d'échec."""
+    G = int(min(1024, max(256, texture_size // 2)))
+    cell_px = texture_size / G
+    r = max(1, int(math.ceil(padding_px / (2.0 * cell_px))))
+    shapes = []
+    total = 0.0
+    for loops, tri_loops in islands:
+        pts = uv[loops]
+        tri = uv[tri_loops]
+        d1 = tri[:, 1] - tri[:, 0]
+        d2 = tri[:, 2] - tri[:, 0]
+        area = 0.5 * np.abs(d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]).sum()
+        total += area
+        shapes.append((loops, pts, tri, area))
+    if total <= 0:
+        return None
+    order = sorted(range(len(shapes)), key=lambda i: -shapes[i][3])
+
+    def rot(p, k):
+        return p if k == 0 else np.stack([-p[..., 1], p[..., 0]], -1)
+
+    def attempt(scale):
+        occ = np.zeros((G, G), dtype=np.float32)
+        out = uv.copy()
+        for i in order:
+            loops, pts, tri, _ = shapes[i]
+            best = None
+            occ_f = np.fft.rfft2(occ)
+            for k in (0, 1):
+                pr = rot(pts, k)
+                mn = pr.min(0)
+                ext = (pr.max(0) - mn) * scale
+                w = int(math.ceil(ext[0])) + 2 * r + 1
+                h = int(math.ceil(ext[1])) + 2 * r + 1
+                if w > G or h > G:
+                    continue
+                tp = (rot(tri, k) - mn) * scale + r
+                m = dilate(conservative_mask(tp, h, w), r)
+                mp = np.zeros((G, G), dtype=np.float32)
+                mp[:h, :w] = m
+                corr = np.fft.irfft2(occ_f * np.conj(np.fft.rfft2(mp)), s=(G, G))
+                free = corr[: G - h + 1, : G - w + 1] < 0.5
+                if not free.any():
+                    continue
+                ys, xs = np.nonzero(free)
+                score = np.maximum(ys + h, xs + w) * (2 * G) + (ys + h) + (xs + w)
+                j = int(np.argmin(score))
+                cand = (score[j], k, int(xs[j]), int(ys[j]), m, mn)
+                if best is None or cand[0] < best[0]:
+                    best = cand
+            if best is None:
+                return None
+            _, k, x, y, m, mn = best
+            occ[y : y + m.shape[0], x : x + m.shape[1]] += m
+            out[loops] = ((rot(pts, k) - mn) * scale + r + np.array([x, y])) / G
+        return out
+
+    hi = G * math.sqrt(1.0 / total)
+    lo = G * math.sqrt(fill_lo / total)
+    best = attempt(lo)
+    while best is None and lo > 1e-9:
+        hi = lo
+        lo *= 0.7
+        best = attempt(lo)
+    if best is None:
+        return None
+    for _ in range(8):
+        mid = math.sqrt(lo * hi)
+        res = attempt(mid)
+        if res is None:
+            hi = mid
+        else:
+            lo, best = mid, res
+        if hi / lo < 1.01:
+            break
+    return best
+
+
+def erode(mask, r):
+    out = mask.copy()
+    pad = np.pad(mask, r, constant_values=False)
+    h, w = mask.shape
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            out &= pad[r + dy : r + dy + h, r + dx : r + dx + w]
+    return out
+
+
+def dilate(mask, r):
+    out = mask.copy()
+    pad = np.pad(mask, r, constant_values=False)
+    h, w = mask.shape
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            out |= pad[r + dy : r + dy + h, r + dx : r + dx + w]
+    return out
 
 
 def raster_count(tri_px, res):
@@ -1539,7 +1760,8 @@ def transfer_texture(obj, args):
     out = bpy.data.images.new("BaseColor_transfer", width=size, height=size, alpha=False)
     out.colorspace_settings.name = "sRGB"
     mat = bpy.data.materials.new("M_UVOptimized")
-    mat.use_nodes = True
+    if bpy.app.version < (5, 0, 0):  # toujours actif à partir de Blender 5
+        mat.use_nodes = True
     nt = mat.node_tree
     nt.nodes.clear()
     uvsrc = nt.nodes.new("ShaderNodeUVMap")
@@ -1594,7 +1816,8 @@ def render_checker_preview(obj, path, args):
     scene = bpy.context.scene
     me = obj.data
     mat = bpy.data.materials.new("M_UVChecker")
-    mat.use_nodes = True
+    if bpy.app.version < (5, 0, 0):  # toujours actif à partir de Blender 5
+        mat.use_nodes = True
     nt = mat.node_tree
     nt.nodes.clear()
     uvn = nt.nodes.new("ShaderNodeUVMap")
@@ -1631,7 +1854,8 @@ def render_checker_preview(obj, path, args):
     scene.render.film_transparent = False
     world = bpy.data.worlds.new("W") if scene.world is None else scene.world
     scene.world = world
-    world.use_nodes = True
+    if bpy.app.version < (5, 0, 0):
+        world.use_nodes = True
     world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.6, 0.6, 0.62, 1)
     world.node_tree.nodes["Background"].inputs["Strength"].default_value = 1.0
     sun_data = bpy.data.lights.new("Sun", "SUN")
@@ -1692,8 +1916,12 @@ def run(args):
     opt.segment()
     if not args.no_merge:
         opt.merge_small()
+    opt.smooth_boundaries()
     opt.ensure_disks()
     opt.unwrap()
+    opt.detach_thin_parts()
+    # Revalidation : le lissage et le détachement ont remodelé des îlots.
+    opt.segment()
     if not args.no_straighten:
         opt.straighten()
     opt.layout()
@@ -1708,7 +1936,7 @@ def run(args):
         log(f"Réparation de {len(selfo)} îlot(s) qui se chevauchent")
         charts = opt.charts(lab, n)
         for c in selfo:
-            opt.split_chart(charts[c])
+            opt.split_chart(charts[c], evaluate=True)
         opt.ensure_disks()
         opt.unwrap()
         opt.layout()
