@@ -92,7 +92,9 @@ def parse_args(argv):
     p.add_argument("--max-distortion", type=float, default=None, help="Distorsion moyenne max par îlot (remplace le préréglage ; 0.10 ≈ 10 %%)")
     p.add_argument("--max-distortion-p95", type=float, default=None, help="Distorsion max au 95e centile par îlot (remplace le préréglage)")
     p.add_argument("--max-iterations", type=int, default=30, help="Itérations max de redécoupage")
-    p.add_argument("--aggressive-cuts", action="store_true", help="Coupes ciblées plus nombreuses : meilleur remplissage, mais plus de coutures")
+    p.add_argument("--gentle-cuts", dest="aggressive_cuts", action="store_false", default=True,
+                   help="Coupes ciblées plus prudentes : moins de coutures, remplissage plus faible "
+                        "(par défaut, coupes plus nombreuses : sur l'Archange 72 % -> 75,6 %, +15 %% de coutures)")
     p.add_argument("--pack-trials", type=int, default=0, help="Essais de rangement supplémentaires (ordres perturbés), le meilleur est gardé (défaut 0)")
     p.add_argument("--target-fill", type=float, default=0.80, help="Remplissage visé : des coupes ciblées sont ajoutées tant qu'elles le font progresser (défaut 0.80 ; 0 = aucune)")
     p.add_argument("--min-compactness", type=float, default=0.45, help="Compacité min d'un îlot (aire / enveloppe convexe), pour un rangement serré (défaut 0.45)")
@@ -1852,10 +1854,10 @@ class UVOptimizer:
         tried = set()
         cuts = 0
         stale = 0
-        cut_kw = dict(min_part=0.08, min_gain=0.0) if aggressive else {}
-        max_stale = 8 if aggressive else 4
+        cut_kw = dict(min_part=0.08, min_gain=0.02) if aggressive else {}
+        max_stale = 6 if aggressive else 4
         if aggressive:
-            max_cuts = max(max_cuts, 120)
+            max_cuts = max(max_cuts, 90)
         while best[0] < target and cuts < max_cuts and stale < max_stale:
             lab, n = self.labels()
             charts = self.charts(lab, n)

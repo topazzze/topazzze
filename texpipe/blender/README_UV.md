@@ -80,12 +80,22 @@ Formats acceptés : `.glb`, `.gltf`, `.fbx`, `.obj`, `.blend` en entrée ;
    de la surface totale limiterait l'échelle de tout le rangement (il doit
    tenir dans la largeur de la texture). Il est coupé au milieu, sur les
    arêtes les moins visibles. Sur l'Archange : remplissage 56 % -> 68 %.
-11. **Rangement par forme réelle** (principe de xatlas) : chaque îlot est
-   rastérisé et placé, sous 4 orientations, dans le premier creux libre, y compris
-   dans les concavités des autres îlots. Marge en pixels adaptée aux mipmaps
-   (`--padding`, par défaut taille / 256 : 16 px en 4K). Bien plus dense que
-   le rangement intégré de Blender (voir les mesures plus bas).
-12. **Contrôle final** : chevauchements recherchés pixel par pixel, îlots
+11. **Coupes ciblées** (principe de Box Cutter, SIGGRAPH 2018) : les îlots
+   qui gaspillent le plus de place (lames, triangles, encoches) reçoivent une
+   coupe droite là où elle réduit le plus leurs rectangles englobants. Les
+   coupes sont faites par lots et vérifiées par de vrais rangements ; on garde
+   le meilleur état rencontré. Elles réduisent aussi la distorsion.
+   `--gentle-cuts` pour des coupes plus prudentes (moins de coutures).
+12. **Bords redressés** : les portions de bord presque horizontales ou
+   verticales deviennent exactement droites (l'intérieur est recalculé), sans
+   dépasser le seuil de distorsion.
+13. **Rangement par forme réelle** (principe de xatlas) : chaque îlot est
+   rastérisé et placé, sous 4 orientations, là où il touche le plus ses
+   voisins (heuristique de contact), y compris dans les creux des autres
+   îlots. Une recherche essaie ensuite d'autres agencements des grandes pièces
+   pour viser plus haut. Marge en pixels adaptée aux mipmaps (`--padding`, par
+   défaut taille / 256 : 16 px en 4K ; ne pas descendre en dessous).
+14. **Contrôle final** : chevauchements recherchés pixel par pixel, îlots
    fautifs redécoupés automatiquement.
 
 ## Symétrie (miroir)
@@ -139,10 +149,17 @@ texture utilise Cycles, sur GPU s'il y en a un), texture 2048 :
 | Mesh | Faces | Îlots | Remplissage | Distorsion moy. | Chevauchements | Durée |
 |---|---|---|---|---|---|---|
 | Robot de test (cylindres, sphères, boîtes chanfreinées) | 1 354 tris | 59 | 86 % | 0,013 | 0 | ~1 min |
-| DamagedHelmet (Khronos, mesh de jeu triangulé) | 15 452 tris | 189 | 67 % | 0,062 | 0 | ~8 min |
+| DamagedHelmet (Khronos, mesh de jeu triangulé), texture 2K | 15 452 tris | 189 | 67 % | 0,062 | 0 | ~8 min |
+| Archange (Tripo, quads, symétrique), texture 4K | 4 466 tris | 93 par moitié | **75,6 %** | 0,064 | 0 | ~12 min |
 
-À titre de comparaison, le rangement intégré de Blender plafonnait à 47-49 %
-de remplissage sur le casque, quels que soient ses réglages.
+Progression mesurée sur l'Archange : 56 % (rangement simple) -> 68 % (îlots
+trop longs coupés) -> 72 % (rangement par contact et recherche) -> 75,6 %
+(coupes ciblées). Pour situer : les guides de production visent 75 % pour les
+props d'environnement et 85 % pour les assets héros ; RizomUV annonce 2 à 4 %
+de gain avec son rangement GPU. Au-delà de ~76 % sur une forme pleine de lames
+effilées comme l'Archange, il faut accepter beaucoup plus de coutures (de
+l'ordre de +80 % selon l'article « Atlas Refinement with Bounded Packing
+Efficiency », SIGGRAPH 2019).
 
 ## Tests
 
