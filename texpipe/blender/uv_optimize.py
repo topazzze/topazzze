@@ -2743,6 +2743,8 @@ def setup_cycles(scene, samples):
     scene.render.engine = "CYCLES"
     scene.cycles.samples = samples
     scene.cycles.use_denoising = False
+    # Sans découpage en tuiles : aucun fichier temporaire écrit sur le disque.
+    scene.cycles.use_auto_tile = False
     try:
         prefs = bpy.context.preferences.addons["cycles"].preferences
         for backend in ("OPTIX", "CUDA", "HIP", "METAL", "ONEAPI"):

@@ -364,6 +364,9 @@ class Baker:
             self.device = "CPU"
         else:
             self.device = setup_cycles(self.scene, samples)
+        # Sans découpage en tuiles : Cycles n'écrit alors aucun fichier
+        # temporaire sur le disque (échec si le disque système est plein).
+        self.scene.cycles.use_auto_tile = False
         bpy.ops.object.select_all(action="DESELECT")
         self.high.select_set(True)
         self.low.select_set(True)
@@ -498,6 +501,7 @@ def render_preview(low, high, maps, path, args, diag):
         scene.cycles.samples = 32
     else:
         setup_cycles(scene, 32)
+    scene.cycles.use_auto_tile = False
     scene.render.resolution_x = scene.render.resolution_y = 768
     scene.render.image_settings.file_format = "PNG"
     scene.view_settings.view_transform = "Standard"

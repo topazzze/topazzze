@@ -1,4 +1,5 @@
 @echo off
+setlocal
 rem Raccourci Windows pour le calcul des cartes (etape 3).
 rem Usage : texpipe\bake_maps.bat mesh_de_jeu_uv.glb highpoly.glb [options...]
 rem Exemple : texpipe\bake_maps.bat robot_uv.glb robot_high.glb --texture-size 4096 --preview apercu_bake.png
@@ -39,4 +40,9 @@ shift
 goto collect
 
 :run
+rem Fichiers temporaires de Blender (tuiles de rendu...) sur le disque du
+rem pipeline, pas dans C:\Users\...\Temp.
+set "TEMP=%HERE%..\cache\tmp"
+set "TMP=%TEMP%"
+if not exist "%TEMP%" mkdir "%TEMP%"
 "%BLENDER%" -b --factory-startup -P "%HERE%blender\bake_maps.py" -- --low "%LOW%" --high "%HIGH%" %EXTRA%

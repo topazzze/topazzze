@@ -1,4 +1,5 @@
 @echo off
+setlocal
 rem Raccourci Windows pour l'optimisation UV.
 rem Usage : texpipe\uv_optimize.bat entree.glb sortie.glb [options...]
 rem Exemple : texpipe\uv_optimize.bat robot_low.glb robot_low_uv.glb --texture-size 4096 --preview apercu.png
@@ -39,4 +40,9 @@ shift
 goto collect
 
 :run
+rem Fichiers temporaires de Blender (tuiles de rendu...) sur le disque du
+rem pipeline, pas dans C:\Users\...\Temp.
+set "TEMP=%HERE%..\cache\tmp"
+set "TMP=%TEMP%"
+if not exist "%TEMP%" mkdir "%TEMP%"
 "%BLENDER%" -b --factory-startup -P "%HERE%blender\uv_optimize.py" -- --input "%IN%" --output "%OUT%" %EXTRA%
