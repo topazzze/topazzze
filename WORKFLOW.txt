@@ -122,6 +122,19 @@ mesure.
   et l'apercu robot01_apercu_materiaux.png.
 
 
+6 bis. MATERIAUX PHOTO (AmbientCG, Poly Haven) .............. DISPONIBLE
+------------------------------------------------------------------
+    texpipe\find_materials.bat assets\robot01\robot01_uv.glb
+
+  Regarder robot01_materiaux_candidats.png (chaque zone rendue avec ses
+  matériaux candidats, nom sous chaque image), puis choisir dans
+  robot01_materials_choice.txt. Ensuite :
+
+    texpipe\open_materials.bat assets\robot01\robot01_uv.glb
+
+  -> robot01_materials.blend s'ouvre dans Blender, matériaux en place.
+
+
 7. EXPORT ET IMPORT UNREAL ........................... (a la main)
 ------------------------------------------------------------------
   Mesh : robot01_uv.glb. Dans Unreal : BC en sRGB ; N en Normalmap ;

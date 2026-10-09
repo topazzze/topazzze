@@ -67,3 +67,68 @@ matériau (méthode RNM), en convention DirectX.
 
 **Sorties :** `T_robot_BC.png`, `T_robot_N.png`, `T_robot_ORM.png`,
 `T_robot_E.png`, et l'aperçu `robot_apercu_materiaux.png` (rendu Cycles).
+
+## Étape 6 bis : matériaux photo (AmbientCG, Poly Haven)
+
+Variante de l'étape 6 avec de vraies textures photo, CC0 (usage commercial
+libre, sans attribution).
+
+**1. Recherche et images des candidats**
+
+```bat
+texpipe\find_materials.bat robot_uv.glb
+```
+
+- Pour chaque zone, des matériaux correspondant à son type sont cherchés sur
+  les deux sites. Par exemple, `metal_sombre` donne « black metal »,
+  « dark metal » et « painted metal ».
+- Ils sont téléchargés en 1K dans `F:\Pipeline\library` (réutilisée d'un asset
+  à l'autre) et classés selon leur ressemblance avec la couleur de la zone.
+- Les 4 meilleurs sont appliqués tour à tour à la zone, et l'objet est rendu
+  dans Blender. Les petites zones (rotules) ont en plus un gros plan, face à la
+  zone.
+- Planches produites :
+  - `robot_zoneN_candidats.png` : une par zone ;
+  - `robot_materiaux_candidats.png` : toutes les zones.
+
+  Sous chaque rendu : le nom du matériau, un échantillon de sa texture, et un
+  cadre vert sur le choix actuel.
+
+Options :
+- `--count 6` : plus de candidats.
+- `--query "1=carbon fiber"` : recherche personnalisée pour une zone.
+
+**2. Validation**
+
+Ouvrir `robot_materials_choice.txt`, qui contient une ligne par zone :
+
+```
+1 = ambientcg:Metal049A
+2 = emissif
+3 = polyhaven:metal_plate taille=0.3
+```
+
+- On peut y mettre n'importe quel candidat des planches, ou `procedural`
+  pour garder le matériau calculé.
+- `taille=` règle la taille du motif, en mètres.
+
+**3. Scène Blender**
+
+```bat
+texpipe\open_materials.bat robot_uv.glb
+```
+
+Télécharge les matériaux retenus en 2K, construit `robot_materials.blend`,
+puis l'ouvre dans Blender. Le matériau y est entièrement éditable :
+
+- un groupe de nœuds par zone ;
+- textures plaquées en projection boîte (taille réelle, sans couture UV) ;
+- relief du HighPoly (normal map de l'étape 3) avec le micro-relief des
+  textures ;
+- usure des arêtes (courbure) et saleté des creux (occlusion) ;
+- LED en émission.
+
+Options :
+- `--wear`, `--dirt` : réglage de l'usure et de la saleté.
+- `--emission` : intensité des LED.
+- `--pack` : textures embarquées dans le `.blend`.
