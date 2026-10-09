@@ -129,6 +129,9 @@ mesure.
 ------------------------------------------------------------------
     texpipe\find_materials.bat assets\robot01\robot01_uv.glb
 
+  Pour decrire un materiau (ex. "metal gris" : metal_nu #8c8c8c
+  recherche=grey_steel dans robot01_zones.txt), voir
+  texpipe\ai\GLOSSAIRE_MATERIAUX.md.
   Regarder robot01_materiaux_candidats.png (chaque zone rendue avec ses
   matériaux candidats, nom sous chaque image), puis choisir dans
   robot01_materials_choice.txt. Ensuite :

@@ -226,6 +226,13 @@ def run(a):
     base = os.path.join(a.maps_dir, a.name)
     zones = read_zone_file(base + "_zones.txt")
     custom = {}
+    # Mots de recherche écrits dans zones.txt : « 3 = metal_nu #808080 recherche=grey_steel ».
+    for line in open(base + "_zones.txt", encoding="utf-8"):
+        if line.lstrip().startswith("#") or "=" not in line:
+            continue
+        for w in line.split("=", 1)[1].split():
+            if w.startswith("recherche="):
+                custom[int(line.split("=", 1)[0])] = w.split("=", 1)[1].replace("_", " ")
     for q in a.query:
         zid, _, text = q.partition("=")
         custom[int(zid)] = text.strip()

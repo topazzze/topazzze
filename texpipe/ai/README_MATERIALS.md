@@ -96,7 +96,11 @@ texpipe\find_materials.bat robot_uv.glb
 
 Options :
 - `--count 6` : plus de candidats.
-- `--query "1=carbon fiber"` : recherche personnalisée pour une zone.
+- `--query "1=carbon fiber"` : recherche personnalisée pour une zone. On peut
+  aussi l'écrire dans `zones.txt` : `3 = metal_nu #8c8c8c recherche=grey_steel`.
+
+Pour savoir quels mots utiliser (« métal gris », « tôle rouillée »…), voir le
+[glossaire des matériaux](GLOSSAIRE_MATERIAUX.md).
 
 **2. Validation**
 
