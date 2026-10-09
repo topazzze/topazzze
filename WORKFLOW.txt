@@ -104,6 +104,11 @@ mesure.
 
     texpipe\zones.bat assets\robot01\robot01_uv.glb
 
+  Apres modification de robot01_zones.txt, l'apercu se refait sans toucher
+  aux zones ni au fichier :
+    texpipe\zones.bat assets\robot01\robot01_uv.glb --preview-only
+  (sans --preview-only, les zones sont recalculees et zones.txt REECRIT).
+
   Verifier robot01_zones_preview.png (zones numerotees, 4 cotes), puis
   ouvrir robot01_zones.txt et corriger si besoin le materiau et la couleur
   de chaque zone (1 a 2 minutes). Materiaux : metal_peint, metal_nu,

@@ -61,6 +61,8 @@ def parse_args(argv=None):
     p.add_argument("--hidden-fill", default="main", choices=["main", "neighbors"],
                    help="Parties vues par aucune image unlit : main (défaut) = matériau principal ; "
                         "neighbors = prolongement des zones voisines")
+    p.add_argument("--preview-only", action="store_true",
+                   help="Régénérer seulement l'aperçu, avec les zones existantes et zones.txt tel que modifié")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args(argv)
     a.mesh = os.path.abspath(a.mesh)
@@ -585,8 +587,26 @@ def render_preview(path, tri_p, tri_n, tri_uv, lab, covered, zones, size=640):
     Image.fromarray(out).save(path)
 
 
+def preview_only(a):
+    """Aperçu refait depuis <nom>_zones_id.png et <nom>_zones.txt (modifié ou
+    non), sans recalculer les zones ni réécrire zones.txt."""
+    base = os.path.join(a.maps_dir, a.name)
+    zid = np.asarray(Image.open(base + "_zones_id.png").convert("L")).astype(np.int64)
+    covered = zid > 0
+    lab = np.maximum(zid - 1, 0)
+    total = max(1, covered.sum())
+    zones = [dict(id=z, material=mat, area_percent=round(100 * float((zid == z).sum()) / total, 1))
+             for z, (mat, _) in sorted(read_zone_file(base + "_zones.txt").items())]
+    tri_p, tri_n, tri_uv = cg.load_glb(a.mesh)
+    render_preview(base + "_zones_preview.png", tri_p, tri_n, tri_uv, lab, covered, zones)
+    log(f"Aperçu régénéré : {base}_zones_preview.png")
+
+
 def main(argv=None):
-    return run(parse_args(argv))
+    a = parse_args(argv)
+    if a.preview_only:
+        return preview_only(a)
+    return run(a)
 
 
 if __name__ == "__main__":
