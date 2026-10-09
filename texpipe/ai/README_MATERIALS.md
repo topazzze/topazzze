@@ -123,9 +123,25 @@ texpipe\open_materials.bat robot_uv.glb
 ```
 
 Télécharge les matériaux retenus en 2K, construit `robot_materials.blend`,
-puis l'ouvre dans Blender. Le matériau y est entièrement éditable :
+puis l'ouvre dans Blender.
 
-- un groupe de nœuds par zone ;
+**Un objet par zone.** Dans la collection `robot`, chaque zone est un objet
+(`robot_Z1_metal_sombre`, `robot_Z2_emissif`…). Tous partagent le même mesh,
+et chacun a son propre matériau :
+
+- Chaque matériau est visible seulement sur sa zone : un masque, au pixel près,
+  pilote la transparence. Les LED gardent donc leur précision, même quand
+  elles traversent les faces du mesh.
+- Sélectionner un objet donne accès au matériau de sa zone seule.
+- Masquer un objet dans l'outliner montre sa zone en creux.
+- Les objets sont décalés de 0,05 mm (modificateur « Decalage_zone ») pour
+  éviter les conflits d'affichage entre surfaces superposées.
+- `--single-material` : un seul objet avec un seul matériau qui mélange les
+  zones, comme avant.
+
+Chaque matériau contient :
+
+- un groupe de nœuds pour le matériau de la zone ;
 - textures plaquées en projection boîte (taille réelle, sans couture UV) ;
 - relief du HighPoly (normal map de l'étape 3) avec le micro-relief des
   textures ;

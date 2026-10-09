@@ -138,7 +138,8 @@ mesure.
 
     texpipe\open_materials.bat assets\robot01\robot01_uv.glb
 
-  -> robot01_materials.blend s'ouvre dans Blender, matériaux en place.
+  -> robot01_materials.blend s'ouvre dans Blender : un objet par zone
+     (robot01_Z1_metal_sombre...), chacun avec son propre materiau.
 
 
 7. EXPORT ET IMPORT UNREAL ........................... (a la main)

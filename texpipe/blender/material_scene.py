@@ -49,6 +49,8 @@ def parse_args(argv):
     p.add_argument("--emission", type=float, default=3.0, help="Intensité des LED (défaut 3)")
     p.add_argument("--size", type=int, default=640, help="Taille des rendus des candidats")
     p.add_argument("--samples", type=int, default=48)
+    p.add_argument("--single-material", action="store_true",
+                   help="Un seul objet avec un seul matériau mélangeant les zones (au lieu d'un objet par zone)")
     p.add_argument("--pack", action="store_true", help="Embarquer les textures dans le .blend (fichier autonome)")
     p.add_argument("--cpu", action="store_true")
     a = p.parse_args(argv)
@@ -178,9 +180,12 @@ class ZoneMaterial:
     """Matériau final : un nœud de groupe par zone, mélangés selon la carte
     des zones (UV), + normal map calculée, usure, saleté, LED."""
 
-    def __init__(self, a, zones, initial):
+    def __init__(self, a, zones, initial, alpha_zone=None, name=None):
+        """`alpha_zone` : matériau d'une seule zone, visible seulement sur
+        celle-ci (masque en transparence) ; sinon toutes les zones mélangées."""
         base = os.path.join(a.maps_dir, a.name)
-        self.mat = new_material(f"M_{a.name}_zones")
+        self.mat = new_material(name or f"M_{a.name}_zones")
+        self.masks = {}
         nt = self.nt = self.mat.node_tree
         L = nt.links
         out = nt.nodes.new("ShaderNodeOutputMaterial")
@@ -209,7 +214,9 @@ class ZoneMaterial:
             mask.operation = "COMPARE"
             mask.inputs[1].default_value = float(z)
             mask.inputs[2].default_value = 0.5
+            mask.label = f"Masque zone {z}"
             L.new(to255.outputs["Value"], mask.inputs[0])
+            self.masks[z] = mask
             if mat == "emissif":
                 emis_mask = (mask, col or (1.0, 1.0, 1.0))
                 continue
@@ -305,6 +312,16 @@ class ZoneMaterial:
             strength.inputs[1].default_value = a.emission
             L.new(mask.outputs["Value"], strength.inputs[0])
             L.new(strength.outputs["Value"], bsdf.inputs["Emission Strength"])
+            if color is None:  # zone lumineuse seule : surface sombre sous la lumière
+                bsdf.inputs["Base Color"].default_value = (0.02, 0.02, 0.02, 1.0)
+                bsdf.inputs["Roughness"].default_value = 0.3
+
+        if alpha_zone is not None:
+            L.new(self.masks[alpha_zone].outputs["Value"], bsdf.inputs["Alpha"])
+            if hasattr(self.mat, "surface_render_method"):  # Blender 4.2+
+                self.mat.surface_render_method = "DITHERED"
+            elif hasattr(self.mat, "blend_method"):
+                self.mat.blend_method = "HASHED"
 
     def set_zone(self, z, group):
         if z in self.groups:
@@ -419,6 +436,34 @@ def render_views(scene, cam, focus, path_full, path_out):
     os.remove(path_full)
 
 
+def separate_zone_objects(a, obj, zones, chosen_group):
+    """Un objet par zone, tous sur le même mesh (données partagées), chacun
+    avec son propre matériau complet, visible seulement sur sa zone : chaque
+    matériau se règle séparément dans Blender, et masquer un objet montre sa
+    zone en creux. Un décalage de 0,05 mm par zone (le long des normales)
+    évite les conflits entre surfaces superposées."""
+    coll = bpy.data.collections.new(a.name)
+    bpy.context.scene.collection.children.link(coll)
+    root = bpy.data.objects.new(a.name, None)
+    coll.objects.link(root)
+    mesh = obj.data
+    for rank, (z, (mat, col)) in enumerate(sorted(zones.items())):
+        zmat = ZoneMaterial(a, {z: (mat, col)}, chosen_group, alpha_zone=z, name=f"M_{a.name}_Z{z}_{mat}")
+        o = bpy.data.objects.new(f"{a.name}_Z{z}_{mat}", mesh)
+        coll.objects.link(o)
+        o.parent = root
+        o.material_slots[0].link = "OBJECT"
+        o.material_slots[0].material = zmat.mat
+        if rank:
+            mod = o.modifiers.new("Decalage_zone", "DISPLACE")
+            mod.mid_level = 0.0
+            mod.strength = 5e-5 * rank
+    bpy.data.objects.remove(obj)
+    root.name = a.name  # nom libéré par l'objet d'origine
+    mesh.materials[0] = None  # chaque objet-zone porte son propre matériau
+    log(f"{len(zones)} objets-zones, un matériau chacun (collection « {a.name} »)")
+
+
 def candidate_group(z, c, zones):
     tile = c.get("tile_m")
     if tile is None and c.get("dimensions_mm"):
@@ -454,6 +499,7 @@ def main():
     for p in obj.data.polygons:
         p.material_index = 0
     scene = setup_scene(a, obj)
+    scene.cycles.transparent_max_bounces = 64  # objets-zones superposés
 
     if a.candidates:
         out_dir = base + "_renders"
@@ -474,6 +520,8 @@ def main():
                 log(f"Zone {z}, candidat {k + 1} : {c['source']}:{c['id']}")
             if keep is not None:
                 zm.set_zone(z, keep)
+    if a.build and not a.single_material:
+        separate_zone_objects(a, obj, zones, chosen_group)
     if a.build:
         path = base + "_materials.blend"
         bpy.data.orphans_purge(do_recursive=True)  # matériau et image du .glb d'origine

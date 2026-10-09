@@ -1,1 +1,1 @@
-2026-10-09 : zones unlit (priorité face, matériau principal), matériaux photo
+2026-10-09b : un objet et un matériau par zone dans Blender, glossaire, recherche= dans zones.txt
