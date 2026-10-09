@@ -33,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 import color_guide as cg  # noqa: E402
-from imgops import box_blur, fill_invalid, linear_to_srgb, save_png  # noqa: E402
+from imgops import pipeline_version, box_blur, fill_invalid, linear_to_srgb, save_png  # noqa: E402
 from zones import read_zone_file  # noqa: E402
 
 # Matériaux : couleur linéaire par défaut, métal, rugosité, variation de
@@ -186,6 +186,7 @@ def resize(arr, size):
 def run(a):
     t0 = time.time()
     base = os.path.join(a.maps_dir, a.name)
+    log("Version du pipeline : " + pipeline_version())
     need = [f"{base}_normal.png", f"{base}_ao.png", f"{base}_curvature.png", f"{base}_zones_id.png", a.zones_file]
     missing = [p for p in need if not os.path.exists(p)]
     if missing:

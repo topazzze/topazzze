@@ -9,8 +9,11 @@ mesure.
 0. INSTALLATION (une seule fois) ............................. FAIT
 ------------------------------------------------------------------
   Double-clic sur F:\Pipeline\install.bat
-  Mise a jour du pipeline : recuperer la derniere version du repo GitHub
-  (branche claude/keen-heisenberg-we6ihj), puis relancer install.bat.
+  Mise a jour du pipeline : double-clic sur F:\Pipeline\update.bat. Les
+  scripts sont remplaces par la derniere version (meme s'ils existent deja),
+  sans toucher a assets, models, library ni .venv. Chaque etape affiche au
+  lancement "Version du pipeline : ..." pour verifier.
+  Relancer install.bat seulement si requirements.txt a change.
 
 
 1. PREPARER UN ASSET DANS TRIPO3D ................................

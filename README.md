@@ -19,6 +19,8 @@ Installation (Windows) : double-clic sur `install.bat` (détecte Blender, instal
 Python 3.11 si besoin, PyTorch CUDA, bibliothèques, MV-Adapter ; ni winget ni Git requis). Ajouter `-Models` pour télécharger
 aussi les modèles IA (~6 Go) : `install.bat -Models`.
 
+Mise à jour : double-clic sur `update.bat` (remplace les scripts, garde `assets`).
+
 Démarrage rapide (Windows) :
 
 ```bat

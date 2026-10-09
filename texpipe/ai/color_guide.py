@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
-from imgops import box_blur, fill_invalid, save_png  # noqa: E402
+from imgops import pipeline_version, box_blur, fill_invalid, save_png  # noqa: E402
 
 # Caméras de MV-Adapter (scripts/inference_ig2mv_*.py) : 4 vues autour,
 # dessus et dessous, orthographiques.
@@ -599,6 +599,7 @@ def back_project(images, views, pos, nrm, covered, masks=None, best_only=False, 
 # -- programme principal ----------------------------------------------------------------
 def run(a):
     t0 = time.time()
+    log("Version du pipeline : " + pipeline_version())
     os.makedirs(a.output_dir, exist_ok=True)
     base = os.path.join(a.output_dir, a.name)
     tri_p, tri_n, tri_uv = load_glb(a.mesh)

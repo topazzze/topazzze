@@ -33,6 +33,8 @@ from PIL import Image, ImageDraw
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from zones import read_zone_file, srgb_to_lab  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
+from imgops import pipeline_version  # noqa: E402
 
 USER_AGENT = "topazzze-texpipe/1.0 (pipeline de texturing ; contact : depot GitHub topazzze)"
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -220,6 +222,7 @@ def rank(cands, target_rgb, want_metal):
 
 
 def run(a):
+    log("Version du pipeline : " + pipeline_version())
     base = os.path.join(a.maps_dir, a.name)
     zones = read_zone_file(base + "_zones.txt")
     custom = {}

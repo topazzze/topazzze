@@ -1,6 +1,7 @@
 """Opérations d'image en numpy pur, partagées par les scripts Blender et
 les scripts IA du pipeline (aucune dépendance à Blender ni à torch)."""
 
+import os
 import zlib
 
 import numpy as np
@@ -82,3 +83,13 @@ def save_png(path, img, bits=8):
         fh.write(chunk(b"IHDR", ihdr))
         fh.write(chunk(b"IDAT", zlib.compress(raw.astype(np.uint8).tobytes(), 6)))
         fh.write(chunk(b"IEND", b""))
+
+
+def pipeline_version():
+    """Version du pipeline (texpipe/VERSION.txt), affichée au lancement."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION.txt")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return "inconnue"

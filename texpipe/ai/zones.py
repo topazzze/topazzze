@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 import color_guide as cg  # noqa: E402
-from imgops import box_blur, fill_invalid, save_png  # noqa: E402
+from imgops import pipeline_version, box_blur, fill_invalid, save_png  # noqa: E402
 
 # Matériaux connus de l'étape 6 (texpipe/ai/materials.py).
 MATERIALS = ["metal_peint", "metal_nu", "metal_sombre", "metal_brosse", "chrome", "or", "cuivre",
@@ -143,6 +143,7 @@ def guess_material(lab, metal, rough):
 def run(a):
     t0 = time.time()
     base = os.path.join(a.maps_dir, a.name)
+    log("Version du pipeline : " + pipeline_version())
     size = a.size
     guide = load_map(f"{base}_color_guide.png", size)
     tripo = load_map(f"{base}_basecolor_high.png", size)
